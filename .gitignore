@@ -63,3 +63,7 @@ CLAUDE.md
 .vbw-planning/
 .mcpregistry_github_token
 .mcpregistry_registry_token
+
+specs
+specs/go-migration/artifacts/
+.**/cache/
