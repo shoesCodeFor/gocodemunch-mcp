@@ -6,7 +6,8 @@ Goal: add a fully local semantic retrieval prototype with env-driven configurati
 
 - [x] In `src/internal/config/config.go`, add config struct fields for vector backend, top-k, query timeout, embedding provider, embedding model, and Ollama base URL without removing or renaming any existing fields.
 - [x] In `src/internal/config/config.go`, add defaults for the new settings (`sqlite`, `5`, `8000`, `ollama`, `bge-m3`, `http://host.docker.internal:11434`) and keep all existing defaults unchanged.
-- [ ] In `src/internal/config/config.go`, load env vars `VECTOR_BACKEND`, `VECTOR_TOP_K`, `VECTOR_QUERY_TIMEOUT_MS`, `EMBEDDING_PROVIDER`, `EMBEDDING_MODEL`, and `OLLAMA_BASE_URL`, then return actionable validation errors for invalid values.
+- [x] In `src/internal/config/config.go`, load env vars `VECTOR_BACKEND`, `VECTOR_TOP_K`, `VECTOR_QUERY_TIMEOUT_MS`, `EMBEDDING_PROVIDER`, `EMBEDDING_MODEL`, and `OLLAMA_BASE_URL`, then return actionable validation errors for invalid values.
+  - Completed: `Load()` now reads all vector env vars, validates them, and returns aggregated actionable errors; `MustLoad()` preserves fail-fast startup behavior for non-error-returning constructors.
 - [ ] In `src/internal/config/config_test.go`, add `TestVectorConfigDefaults` to verify defaults and run `go test ./src/internal/config -run TestVectorConfigDefaults -count=1`.
 - [ ] In `src/internal/config/config_test.go`, add `TestVectorConfigEnvOverrides` to verify env precedence and run `go test ./src/internal/config -run TestVectorConfigEnvOverrides -count=1`.
 - [ ] Add `src/internal/domain/indexing/vector_types.go` with shared vector request/response structs, score fields, and metadata types used by all backends.

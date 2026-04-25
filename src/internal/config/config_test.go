@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -18,7 +19,10 @@ func TestLoadFanoutDefaults(t *testing.T) {
 	t.Setenv("GOCODEMUNCH_REQUEST_TIMEOUT_MS", "")
 	t.Setenv("GOCODEMUNCH_FANOUT_ITEM_TIMEOUT_MS", "")
 
-	cfg := Load()
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
 	if cfg.FanoutMode != "serial" {
 		t.Fatalf("expected default fanout mode serial, got %q", cfg.FanoutMode)
 	}
@@ -49,7 +53,10 @@ func TestLoadFanoutConfigFromEnvironment(t *testing.T) {
 	t.Setenv("GOCODEMUNCH_REQUEST_TIMEOUT_MS", "2500")
 	t.Setenv("GOCODEMUNCH_FANOUT_ITEM_TIMEOUT_MS", "600")
 
-	cfg := Load()
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
 	if cfg.FanoutMode != "parallel" {
 		t.Fatalf("expected parallel fanout mode, got %q", cfg.FanoutMode)
 	}
@@ -75,9 +82,74 @@ func TestLoadFanoutInvalidOverloadPolicyFallsBackToReject(t *testing.T) {
 
 	t.Setenv("GOCODEMUNCH_FANOUT_OVERLOAD_POLICY", "burst")
 
-	cfg := Load()
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
 	if cfg.FanoutOverloadPolicy != "reject" {
 		t.Fatalf("expected invalid overload policy to fall back to reject, got %q", cfg.FanoutOverloadPolicy)
+	}
+}
+
+func TestLoadVectorEnvironmentOverrides(t *testing.T) {
+	isolateConfigPath(t)
+
+	t.Setenv("VECTOR_BACKEND", "SQLITE")
+	t.Setenv("VECTOR_TOP_K", "11")
+	t.Setenv("VECTOR_QUERY_TIMEOUT_MS", "1234")
+	t.Setenv("EMBEDDING_PROVIDER", "OLLAMA")
+	t.Setenv("EMBEDDING_MODEL", "custom-bge")
+	t.Setenv("OLLAMA_BASE_URL", "http://localhost:11434")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.VectorBackend != "sqlite" {
+		t.Fatalf("expected vector backend sqlite, got %q", cfg.VectorBackend)
+	}
+	if cfg.VectorTopK != 11 {
+		t.Fatalf("expected vector top-k 11, got %d", cfg.VectorTopK)
+	}
+	if cfg.VectorQueryTimeoutMS != 1234 {
+		t.Fatalf("expected vector query timeout 1234, got %d", cfg.VectorQueryTimeoutMS)
+	}
+	if cfg.EmbeddingProvider != "ollama" {
+		t.Fatalf("expected embedding provider ollama, got %q", cfg.EmbeddingProvider)
+	}
+	if cfg.EmbeddingModel != "custom-bge" {
+		t.Fatalf("expected embedding model custom-bge, got %q", cfg.EmbeddingModel)
+	}
+	if cfg.OllamaBaseURL != "http://localhost:11434" {
+		t.Fatalf("expected ollama base URL override, got %q", cfg.OllamaBaseURL)
+	}
+}
+
+func TestLoadVectorEnvironmentValidationErrors(t *testing.T) {
+	isolateConfigPath(t)
+
+	t.Setenv("VECTOR_BACKEND", "redis")
+	t.Setenv("VECTOR_TOP_K", "0")
+	t.Setenv("VECTOR_QUERY_TIMEOUT_MS", "-2")
+	t.Setenv("EMBEDDING_PROVIDER", "unknown")
+	t.Setenv("OLLAMA_BASE_URL", "localhost:11434")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected validation error for invalid vector env configuration")
+	}
+
+	message := err.Error()
+	for _, field := range []string{
+		"VECTOR_BACKEND",
+		"VECTOR_TOP_K",
+		"VECTOR_QUERY_TIMEOUT_MS",
+		"EMBEDDING_PROVIDER",
+		"OLLAMA_BASE_URL",
+	} {
+		if !strings.Contains(message, field) {
+			t.Fatalf("expected validation message to mention %s: %q", field, message)
+		}
 	}
 }
 
@@ -86,7 +158,10 @@ func TestLoadLanguagesFromEnvironmentCSV(t *testing.T) {
 
 	t.Setenv("GOCODEMUNCH_LANGUAGES", "python, sql,GO,python")
 
-	cfg := Load()
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
 	expected := []string{"python", "sql", "go"}
 	if !reflect.DeepEqual(cfg.Languages, expected) {
 		t.Fatalf("expected normalized language list %#v, got %#v", expected, cfg.Languages)
@@ -98,7 +173,10 @@ func TestLoadLanguagesFromEnvironmentJSON(t *testing.T) {
 
 	t.Setenv("GOCODEMUNCH_LANGUAGES", `["Python","sql","PYTHON"]`)
 
-	cfg := Load()
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
 	expected := []string{"python", "sql"}
 	if !reflect.DeepEqual(cfg.Languages, expected) {
 		t.Fatalf("expected normalized language list %#v, got %#v", expected, cfg.Languages)
@@ -116,7 +194,10 @@ func TestLoadLanguagesFromConfigFileJSONC(t *testing.T) {
 	}`
 	writeConfigFile(t, storagePath, configPayload)
 
-	cfg := Load()
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
 	expected := []string{"python", "sql"}
 	if !reflect.DeepEqual(cfg.Languages, expected) {
 		t.Fatalf("expected languages from config file %#v, got %#v", expected, cfg.Languages)
@@ -129,7 +210,10 @@ func TestLoadConfigLanguagesTakePrecedenceOverEnvironment(t *testing.T) {
 
 	writeConfigFile(t, storagePath, `{"languages": ["go"]}`)
 
-	cfg := Load()
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
 	expected := []string{"go"}
 	if !reflect.DeepEqual(cfg.Languages, expected) {
 		t.Fatalf("expected config-file languages to override env: got %#v want %#v", cfg.Languages, expected)
@@ -142,7 +226,10 @@ func TestLoadInvalidConfigLanguagesFallsBackToEnvironment(t *testing.T) {
 
 	writeConfigFile(t, storagePath, `{"languages": "python"}`)
 
-	cfg := Load()
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
 	expected := []string{"python", "sql"}
 	if !reflect.DeepEqual(cfg.Languages, expected) {
 		t.Fatalf("expected env fallback when config languages is invalid: got %#v want %#v", cfg.Languages, expected)
@@ -155,7 +242,10 @@ func TestLoadDisabledToolsFromConfigFileTakePrecedence(t *testing.T) {
 
 	writeConfigFile(t, storagePath, `{"disabled_tools": ["search_text"]}`)
 
-	cfg := Load()
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
 	if !cfg.IsToolDisabled("search_text") {
 		t.Fatalf("expected search_text to be disabled via config file")
 	}
@@ -170,7 +260,10 @@ func TestLoadMetaFieldsNullInConfigSkipsEnvFallback(t *testing.T) {
 
 	writeConfigFile(t, storagePath, `{"meta_fields": null}`)
 
-	cfg := Load()
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
 	if cfg.MetaFields != nil {
 		t.Fatalf("expected nil meta fields from explicit config null, got %#v", cfg.MetaFields)
 	}
@@ -442,7 +535,10 @@ func TestLoadTrustedFoldersConfigTakesPrecedenceOverEnvironment(t *testing.T) {
 		"trusted_folders_whitelist_mode": false
 	}`, fileTrusted))
 
-	cfg := Load()
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
 	if !reflect.DeepEqual(cfg.TrustedFolders, []string{canonicalPathForTest(t, fileTrusted)}) {
 		t.Fatalf("expected trusted_folders from config file, got %#v", cfg.TrustedFolders)
 	}

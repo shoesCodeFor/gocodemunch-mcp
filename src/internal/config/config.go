@@ -2,6 +2,8 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -112,7 +114,7 @@ type globalConfigSnapshot struct {
 }
 
 // Load reads environment-backed configuration.
-func Load() Config {
+func Load() (Config, error) {
 	storagePath := strings.TrimSpace(os.Getenv("CODE_INDEX_PATH"))
 	snapshot := loadGlobalConfigSnapshot(storagePath)
 
@@ -149,6 +151,10 @@ func Load() Config {
 		MaxFolderFiles: defaultMaxFolderFiles,
 		MaxIndexFiles:  defaultMaxIndexFiles,
 		Disabled:       map[string]struct{}{},
+	}
+
+	if err := applyVectorEnvOverrides(&cfg); err != nil {
+		return cfg, err
 	}
 
 	if snapshot.HasLanguages {
@@ -240,6 +246,17 @@ func Load() Config {
 		cfg.Disabled[name] = struct{}{}
 	}
 
+	return cfg, nil
+}
+
+// MustLoad reads environment-backed configuration and panics when validation
+// fails. Startup paths that cannot return config errors directly should call
+// this helper to remain fail-fast.
+func MustLoad() Config {
+	cfg, err := Load()
+	if err != nil {
+		panic(err)
+	}
 	return cfg
 }
 
@@ -354,6 +371,123 @@ func getenv(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func applyVectorEnvOverrides(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+
+	validationErrors := []string{}
+
+	if raw, ok := getenvTrimmed("VECTOR_BACKEND"); ok {
+		backend := strings.ToLower(raw)
+		switch backend {
+		case "sqlite":
+			cfg.VectorBackend = backend
+		default:
+			validationErrors = append(
+				validationErrors,
+				fmt.Sprintf(
+					`VECTOR_BACKEND must be one of ["sqlite"] (got %q); set VECTOR_BACKEND=sqlite`,
+					raw,
+				),
+			)
+		}
+	}
+
+	if raw, ok := getenvTrimmed("VECTOR_TOP_K"); ok {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 {
+			validationErrors = append(
+				validationErrors,
+				fmt.Sprintf(
+					"VECTOR_TOP_K must be a positive integer (got %q); set VECTOR_TOP_K=%d",
+					raw,
+					defaultVectorTopK,
+				),
+			)
+		} else {
+			cfg.VectorTopK = value
+		}
+	}
+
+	if raw, ok := getenvTrimmed("VECTOR_QUERY_TIMEOUT_MS"); ok {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 0 {
+			validationErrors = append(
+				validationErrors,
+				fmt.Sprintf(
+					"VECTOR_QUERY_TIMEOUT_MS must be a non-negative integer in milliseconds (got %q); set VECTOR_QUERY_TIMEOUT_MS=%d",
+					raw,
+					defaultVectorQueryTimeoutMS,
+				),
+			)
+		} else {
+			cfg.VectorQueryTimeoutMS = value
+		}
+	}
+
+	if raw, ok := getenvTrimmed("EMBEDDING_PROVIDER"); ok {
+		provider := strings.ToLower(raw)
+		switch provider {
+		case "ollama":
+			cfg.EmbeddingProvider = provider
+		default:
+			validationErrors = append(
+				validationErrors,
+				fmt.Sprintf(
+					`EMBEDDING_PROVIDER must be one of ["ollama"] (got %q); set EMBEDDING_PROVIDER=ollama`,
+					raw,
+				),
+			)
+		}
+	}
+
+	if raw, ok := getenvTrimmed("EMBEDDING_MODEL"); ok {
+		cfg.EmbeddingModel = raw
+	}
+
+	if raw, ok := getenvTrimmed("OLLAMA_BASE_URL"); ok {
+		parsed, err := url.Parse(raw)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			validationErrors = append(
+				validationErrors,
+				fmt.Sprintf(
+					"OLLAMA_BASE_URL must be an absolute HTTP URL (got %q); set OLLAMA_BASE_URL=%s",
+					raw,
+					defaultOllamaBaseURL,
+				),
+			)
+		} else {
+			switch strings.ToLower(parsed.Scheme) {
+			case "http", "https":
+				cfg.OllamaBaseURL = raw
+			default:
+				validationErrors = append(
+					validationErrors,
+					fmt.Sprintf(
+						"OLLAMA_BASE_URL must use http or https (got %q); set OLLAMA_BASE_URL=%s",
+						raw,
+						defaultOllamaBaseURL,
+					),
+				)
+			}
+		}
+	}
+
+	if len(validationErrors) == 0 {
+		return nil
+	}
+	return fmt.Errorf("vector configuration validation failed: %s", strings.Join(validationErrors, "; "))
+}
+
+func getenvTrimmed(key string) (string, bool) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return "", false
+	}
+	return value, true
 }
 
 func splitCSV(raw string) []string {

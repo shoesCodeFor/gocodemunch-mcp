@@ -34,7 +34,11 @@ func run() int {
 }
 
 func runWithArgs(args []string) int {
-	cfg := config.Load()
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config validation failed: %v\n", err)
+		return 1
+	}
 
 	flags := flag.NewFlagSet("gocodemunch-mcp", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)

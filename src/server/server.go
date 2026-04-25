@@ -59,7 +59,7 @@ type Server struct {
 // New wires config, orchestration, and stdio transport.
 func New(in io.Reader, out io.Writer, optionFns ...Option) *Server {
 	opts := serverOptions{
-		cfg: config.Load(),
+		cfg: config.MustLoad(),
 	}
 	for _, option := range optionFns {
 		option(&opts)
@@ -106,7 +106,7 @@ func (s *Server) WatcherBatchProcessor() watcher.BatchProcessor {
 // ToolNames returns currently enabled tool names in deterministic order.
 func ToolNames(optionFns ...Option) []string {
 	opts := serverOptions{
-		cfg: config.Load(),
+		cfg: config.MustLoad(),
 	}
 	for _, option := range optionFns {
 		option(&opts)
