@@ -91,6 +91,48 @@ func TestLoadFanoutInvalidOverloadPolicyFallsBackToReject(t *testing.T) {
 	}
 }
 
+func TestVectorConfigDefaults(t *testing.T) {
+	isolateConfigPath(t)
+
+	t.Setenv("VECTOR_BACKEND", "")
+	t.Setenv("VECTOR_TOP_K", "")
+	t.Setenv("VECTOR_QUERY_TIMEOUT_MS", "")
+	t.Setenv("EMBEDDING_PROVIDER", "")
+	t.Setenv("EMBEDDING_MODEL", "")
+	t.Setenv("OLLAMA_BASE_URL", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.VectorBackend != defaultVectorBackend {
+		t.Fatalf("expected default vector backend %q, got %q", defaultVectorBackend, cfg.VectorBackend)
+	}
+	if cfg.VectorTopK != defaultVectorTopK {
+		t.Fatalf("expected default vector top-k %d, got %d", defaultVectorTopK, cfg.VectorTopK)
+	}
+	if cfg.VectorQueryTimeoutMS != defaultVectorQueryTimeoutMS {
+		t.Fatalf(
+			"expected default vector query timeout %d, got %d",
+			defaultVectorQueryTimeoutMS,
+			cfg.VectorQueryTimeoutMS,
+		)
+	}
+	if cfg.EmbeddingProvider != defaultEmbeddingProvider {
+		t.Fatalf(
+			"expected default embedding provider %q, got %q",
+			defaultEmbeddingProvider,
+			cfg.EmbeddingProvider,
+		)
+	}
+	if cfg.EmbeddingModel != defaultEmbeddingModel {
+		t.Fatalf("expected default embedding model %q, got %q", defaultEmbeddingModel, cfg.EmbeddingModel)
+	}
+	if cfg.OllamaBaseURL != defaultOllamaBaseURL {
+		t.Fatalf("expected default ollama base URL %q, got %q", defaultOllamaBaseURL, cfg.OllamaBaseURL)
+	}
+}
+
 func TestLoadVectorEnvironmentOverrides(t *testing.T) {
 	isolateConfigPath(t)
 
