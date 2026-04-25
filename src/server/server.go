@@ -2,12 +2,17 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"strings"
+	"time"
 
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/config"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/domain/indexing"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/orchestration"
+	"github.com/jgravelle/gocodemunch-mcp/src/internal/orchestration/embeddings"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/storage"
+	vectorsqlite "github.com/jgravelle/gocodemunch-mcp/src/internal/storage/vector/sqlite"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/transport/mcp"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/watcher"
 )
@@ -65,7 +70,21 @@ func New(in io.Reader, out io.Writer, optionFns ...Option) *Server {
 		option(&opts)
 	}
 
+	deps, err := buildDependencies(opts)
+	if err != nil {
+		panic(fmt.Errorf("server startup dependency wiring failed: %w", err))
+	}
+
+	service := orchestration.New(opts.cfg, deps)
+	return &Server{
+		inner:   mcp.NewServer(in, out, service, opts.cfg),
+		service: service,
+	}
+}
+
+func buildDependencies(opts serverOptions) (orchestration.Dependencies, error) {
 	deps := orchestration.Dependencies{}
+
 	if indexStore, err := storage.NewSQLiteIndexStore(opts.cfg.StoragePath); err == nil {
 		deps.IndexStore = indexStore
 	}
@@ -82,10 +101,80 @@ func New(in io.Reader, out io.Writer, optionFns ...Option) *Server {
 		}
 	}
 
-	service := orchestration.New(opts.cfg, deps)
-	return &Server{
-		inner:   mcp.NewServer(in, out, service, opts.cfg),
-		service: service,
+	vectorBackend, err := buildVectorBackend(opts.cfg)
+	if err != nil {
+		return deps, err
+	}
+	deps.VectorBackend = vectorBackend
+
+	embedder, err := buildEmbedder(opts.cfg)
+	if err != nil {
+		closeIfPossible(vectorBackend)
+		return deps, err
+	}
+	deps.Embedder = embedder
+
+	return deps, nil
+}
+
+func buildVectorBackend(cfg config.Config) (indexing.VectorBackend, error) {
+	backend := strings.ToLower(strings.TrimSpace(cfg.VectorBackend))
+	if backend == "" {
+		backend = "sqlite"
+	}
+
+	switch backend {
+	case "sqlite":
+		adapter, err := vectorsqlite.NewAdapter(cfg.StoragePath)
+		if err != nil {
+			return nil, fmt.Errorf("initialize sqlite vector backend: %w", err)
+		}
+		return adapter, nil
+	default:
+		return nil, fmt.Errorf(
+			"unsupported vector backend %q (set VECTOR_BACKEND=sqlite)",
+			cfg.VectorBackend,
+		)
+	}
+}
+
+func buildEmbedder(cfg config.Config) (indexing.Embedder, error) {
+	provider := strings.ToLower(strings.TrimSpace(cfg.EmbeddingProvider))
+	if provider == "" {
+		provider = "ollama"
+	}
+	if cfg.VectorQueryTimeoutMS < 0 {
+		return nil, fmt.Errorf(
+			"vector query timeout must be non-negative (got %dms)",
+			cfg.VectorQueryTimeoutMS,
+		)
+	}
+
+	switch provider {
+	case "ollama":
+		embedder, err := embeddings.NewOllamaEmbedder(
+			cfg.OllamaBaseURL,
+			cfg.EmbeddingModel,
+			time.Duration(cfg.VectorQueryTimeoutMS)*time.Millisecond,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("initialize ollama embedder: %w", err)
+		}
+		return embedder, nil
+	default:
+		return nil, fmt.Errorf(
+			"unsupported embedding provider %q (set EMBEDDING_PROVIDER=ollama)",
+			cfg.EmbeddingProvider,
+		)
+	}
+}
+
+func closeIfPossible(candidate any) {
+	type closer interface {
+		Close() error
+	}
+	if closable, ok := candidate.(closer); ok {
+		_ = closable.Close()
 	}
 }
 

@@ -39,6 +39,8 @@ type Dependencies struct {
 	ContentCache    storage.ContentCache
 	ParserExtractor indexing.ParserExtractor
 	Summarizer      indexing.SummarizerProvider
+	Embedder        indexing.Embedder
+	VectorBackend   indexing.VectorBackend
 	RepoAcquirer    indexing.RepoAcquirer
 	Watcher         watcher.Controller
 	PathGuard       security.PathGuard
