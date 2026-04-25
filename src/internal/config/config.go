@@ -14,16 +14,22 @@ const (
 	defaultFreshnessMode        = "relaxed"
 	defaultFanoutMode           = "serial"
 	defaultFanoutOverloadPolicy = "reject"
+	defaultVectorBackend        = "sqlite"
+	defaultEmbeddingProvider    = "ollama"
+	defaultEmbeddingModel       = "bge-m3"
+	defaultOllamaBaseURL        = "http://host.docker.internal:11434"
 	defaultStorageDirName       = ".code-index"
 	globalConfigFileName        = "config.jsonc"
 	projectConfigFileName       = ".jcodemunch.jsonc"
 
-	defaultFanoutMaxWorkers    = 4
-	defaultFanoutMaxQueueDepth = 256
-	defaultRequestTimeoutMS    = 0
-	defaultFanoutItemTimeoutMS = 0
-	defaultMaxFolderFiles      = 2000
-	defaultMaxIndexFiles       = 10000
+	defaultFanoutMaxWorkers     = 4
+	defaultFanoutMaxQueueDepth  = 256
+	defaultRequestTimeoutMS     = 0
+	defaultVectorTopK           = 5
+	defaultVectorQueryTimeoutMS = 8000
+	defaultFanoutItemTimeoutMS  = 0
+	defaultMaxFolderFiles       = 2000
+	defaultMaxIndexFiles        = 10000
 )
 
 // Config holds process-level server configuration.
@@ -130,6 +136,12 @@ func Load() Config {
 			os.Getenv("GOCODEMUNCH_REQUEST_TIMEOUT_MS"),
 			defaultRequestTimeoutMS,
 		),
+		VectorBackend:        defaultVectorBackend,
+		VectorTopK:           defaultVectorTopK,
+		VectorQueryTimeoutMS: defaultVectorQueryTimeoutMS,
+		EmbeddingProvider:    defaultEmbeddingProvider,
+		EmbeddingModel:       defaultEmbeddingModel,
+		OllamaBaseURL:        defaultOllamaBaseURL,
 		FanoutItemTimeoutMS: parseNonNegativeInt(
 			os.Getenv("GOCODEMUNCH_FANOUT_ITEM_TIMEOUT_MS"),
 			defaultFanoutItemTimeoutMS,

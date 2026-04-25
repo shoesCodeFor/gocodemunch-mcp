@@ -5,7 +5,7 @@ Goal: add a fully local semantic retrieval prototype with env-driven configurati
 ## Auto-Run Tasks
 
 - [x] In `src/internal/config/config.go`, add config struct fields for vector backend, top-k, query timeout, embedding provider, embedding model, and Ollama base URL without removing or renaming any existing fields.
-- [ ] In `src/internal/config/config.go`, add defaults for the new settings (`sqlite`, `5`, `8000`, `ollama`, `bge-m3`, `http://host.docker.internal:11434`) and keep all existing defaults unchanged.
+- [x] In `src/internal/config/config.go`, add defaults for the new settings (`sqlite`, `5`, `8000`, `ollama`, `bge-m3`, `http://host.docker.internal:11434`) and keep all existing defaults unchanged.
 - [ ] In `src/internal/config/config.go`, load env vars `VECTOR_BACKEND`, `VECTOR_TOP_K`, `VECTOR_QUERY_TIMEOUT_MS`, `EMBEDDING_PROVIDER`, `EMBEDDING_MODEL`, and `OLLAMA_BASE_URL`, then return actionable validation errors for invalid values.
 - [ ] In `src/internal/config/config_test.go`, add `TestVectorConfigDefaults` to verify defaults and run `go test ./src/internal/config -run TestVectorConfigDefaults -count=1`.
 - [ ] In `src/internal/config/config_test.go`, add `TestVectorConfigEnvOverrides` to verify env precedence and run `go test ./src/internal/config -run TestVectorConfigEnvOverrides -count=1`.
