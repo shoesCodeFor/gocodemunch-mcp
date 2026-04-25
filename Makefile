@@ -1,4 +1,4 @@
-.PHONY: help build build-all build-mcp build-parity build-slo-bench test smoke bench race fmt clean
+.PHONY: help build build-all build-mcp build-parity build-slo-bench test smoke vector-smoke bench race fmt clean
 
 BINDIR := bin
 MCP_BIN := $(BINDIR)/gocodemunch-mcp
@@ -14,6 +14,7 @@ help:
 	@printf "  make build-slo-bench Build $(SLO_BENCH_BIN)\n"
 	@printf "  make test           Run the full Go test suite\n"
 	@printf "  make smoke          Run stdio startup smoke test\n"
+	@printf "  make vector-smoke   Run local vector retrieval smoke test\n"
 	@printf "  make fmt            Run gofmt across the repo\n"
 	@printf "  make clean          Remove built binaries\n"
 	@printf "  make bench          Run benchmark script\n"
@@ -40,6 +41,9 @@ test:
 
 smoke:
 	go test ./tests-go -run TestStdIOServerStartupSmoke -v
+
+vector-smoke:
+	./scripts/vector-smoke.sh
 
 fmt:
 	go fmt ./...

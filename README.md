@@ -12,6 +12,7 @@ make build
 make build-all
 make test
 make smoke
+make vector-smoke
 make fmt
 make clean
 ```
@@ -33,6 +34,7 @@ Compiled binaries are written to `./bin`:
 - `make build-slo-bench` – build only `bin/gocodemunch-slo-bench`
 - `make test` – run the full Go test suite
 - `make smoke` – run the stdio server startup smoke test
+- `make vector-smoke` – index fixture vectors and print top semantic matches
 - `make fmt` – format Go source files with `gofmt`
 - `make clean` – remove generated binaries from `bin/`
 - `make bench` – run the benchmark script
