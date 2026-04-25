@@ -10,7 +10,8 @@ Goal: add a fully local semantic retrieval prototype with env-driven configurati
   - Completed: `Load()` now reads all vector env vars, validates them, and returns aggregated actionable errors; `MustLoad()` preserves fail-fast startup behavior for non-error-returning constructors.
 - [x] In `src/internal/config/config_test.go`, add `TestVectorConfigDefaults` to verify defaults and run `go test ./src/internal/config -run TestVectorConfigDefaults -count=1`.
   - Completed: Added `TestVectorConfigDefaults` covering default vector backend/top-k/query-timeout/provider/model/Ollama URL values; `go test ./src/internal/config -run TestVectorConfigDefaults -count=1` passed.
-- [ ] In `src/internal/config/config_test.go`, add `TestVectorConfigEnvOverrides` to verify env precedence and run `go test ./src/internal/config -run TestVectorConfigEnvOverrides -count=1`.
+- [x] In `src/internal/config/config_test.go`, add `TestVectorConfigEnvOverrides` to verify env precedence and run `go test ./src/internal/config -run TestVectorConfigEnvOverrides -count=1`.
+  - Completed: Renamed the existing override coverage to `TestVectorConfigEnvOverrides` (same env precedence assertions across vector backend/top-k/timeout/provider/model/Ollama URL) and verified with `go test ./src/internal/config -run TestVectorConfigEnvOverrides -count=1`.
 - [ ] Add `src/internal/domain/indexing/vector_types.go` with shared vector request/response structs, score fields, and metadata types used by all backends.
 - [ ] Add `src/internal/domain/indexing/vector_contracts.go` with interfaces for `Upsert`, `Query`, `Delete`, `DeleteNamespace`, and `Health(ctx)` plus embedder contract and retryable error classification.
 - [ ] Add `src/internal/orchestration/embeddings/ollama.go` implementing batched embedding requests with context timeout handling and `bge-m3` dimension checks.

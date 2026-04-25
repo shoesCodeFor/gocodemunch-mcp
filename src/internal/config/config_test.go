@@ -133,7 +133,7 @@ func TestVectorConfigDefaults(t *testing.T) {
 	}
 }
 
-func TestLoadVectorEnvironmentOverrides(t *testing.T) {
+func TestVectorConfigEnvOverrides(t *testing.T) {
 	isolateConfigPath(t)
 
 	t.Setenv("VECTOR_BACKEND", "SQLITE")
