@@ -48,6 +48,18 @@ type Config struct {
 	// RequestTimeoutMS bounds total tool execution time in milliseconds.
 	// Zero disables request timeout budgeting.
 	RequestTimeoutMS int
+	// VectorBackend selects the vector storage backend implementation.
+	VectorBackend string
+	// VectorTopK controls the default number of nearest-neighbor results.
+	VectorTopK int
+	// VectorQueryTimeoutMS bounds vector query/embedding calls in milliseconds.
+	VectorQueryTimeoutMS int
+	// EmbeddingProvider selects which embedding service implementation to use.
+	EmbeddingProvider string
+	// EmbeddingModel is the provider model identifier for embeddings.
+	EmbeddingModel string
+	// OllamaBaseURL is the HTTP base URL for Ollama embedding requests.
+	OllamaBaseURL string
 	// FanoutItemTimeoutMS bounds each batch item execution in milliseconds.
 	// Zero disables per-item timeout budgeting.
 	FanoutItemTimeoutMS int
