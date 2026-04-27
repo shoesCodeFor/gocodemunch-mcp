@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha1"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/config"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/domain/indexing"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/orchestration/embeddings"
+	vectorqdrant "github.com/jgravelle/gocodemunch-mcp/src/internal/storage/vector/qdrant"
 	vectorsqlite "github.com/jgravelle/gocodemunch-mcp/src/internal/storage/vector/sqlite"
 )
 
@@ -109,18 +111,12 @@ func runWithArgs(args []string) int {
 		return 2
 	}
 
-	backend := strings.ToLower(strings.TrimSpace(cfg.VectorBackend))
-	if backend == "" {
-		backend = "sqlite"
-	}
-	if backend != "sqlite" {
-		fmt.Fprintf(
-			os.Stderr,
-			"vector smoke only supports sqlite backend, got %q (set VECTOR_BACKEND=sqlite)\n",
-			cfg.VectorBackend,
-		)
+	backend, err := normalizeBackend(cfg.VectorBackend)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid vector backend: %v\n", err)
 		return 2
 	}
+	cfg.VectorBackend = backend
 
 	namespace := strings.TrimSpace(*namespaceArg)
 	if namespace == "" {
@@ -145,24 +141,28 @@ func runWithArgs(args []string) int {
 		return 2
 	}
 
-	storagePath, cleanup, err := resolveStoragePath(cfg.StoragePath, *keepDataArg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "resolve storage path: %v\n", err)
-		return 1
+	cleanupStorage := func() {}
+	if backend == "sqlite" {
+		storagePath, cleanup, resolveErr := resolveStoragePath(cfg.StoragePath, *keepDataArg)
+		if resolveErr != nil {
+			fmt.Fprintf(os.Stderr, "resolve storage path: %v\n", resolveErr)
+			return 1
+		}
+		cleanupStorage = cleanup
+		cfg.StoragePath = storagePath
 	}
-	defer cleanup()
-	cfg.StoragePath = storagePath
+	defer cleanupStorage()
 
 	ctx := context.Background()
 
-	adapter, err := vectorsqlite.NewAdapter(cfg.StoragePath)
+	adapter, err := newVectorBackend(cfg, backend)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "initialize sqlite vector backend: %v\n", err)
+		fmt.Fprintf(os.Stderr, "initialize %s vector backend: %v\n", backend, err)
 		return 1
 	}
 	defer func() {
-		if closeErr := adapter.Close(); closeErr != nil {
-			fmt.Fprintf(os.Stderr, "close sqlite vector backend: %v\n", closeErr)
+		if closeErr := closeVectorBackend(adapter); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "close %s vector backend: %v\n", backend, closeErr)
 		}
 	}()
 
@@ -189,7 +189,7 @@ func runWithArgs(args []string) int {
 		return 1
 	}
 
-	records, err := buildFixtureRecords(namespace, fixtureCorpus, fixtureEmbeddings)
+	records, err := buildFixtureRecords(namespace, backend, fixtureCorpus, fixtureEmbeddings)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "build fixture records: %v\n", err)
 		return 1
@@ -229,6 +229,59 @@ func runWithArgs(args []string) int {
 	printMatches(queryResponse.Matches)
 
 	return 0
+}
+
+func normalizeBackend(rawBackend string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(rawBackend))
+	if normalized == "" {
+		normalized = "sqlite"
+	}
+
+	switch normalized {
+	case "sqlite", "qdrant":
+		return normalized, nil
+	default:
+		return "", fmt.Errorf(
+			"unsupported backend %q (set VECTOR_BACKEND to one of: sqlite, qdrant)",
+			rawBackend,
+		)
+	}
+}
+
+func newVectorBackend(
+	cfg config.Config,
+	backend string,
+) (indexing.VectorBackend, error) {
+	switch backend {
+	case "sqlite":
+		adapter, err := vectorsqlite.NewAdapter(cfg.StoragePath)
+		if err != nil {
+			return nil, err
+		}
+		return adapter, nil
+	case "qdrant":
+		adapter, err := vectorqdrant.NewAdapter(
+			cfg.QdrantURL,
+			cfg.QdrantAPIKey,
+			cfg.QdrantCollection,
+		)
+		if err != nil {
+			return nil, err
+		}
+		return adapter, nil
+	default:
+		return nil, fmt.Errorf("unsupported backend %q", backend)
+	}
+}
+
+func closeVectorBackend(backend indexing.VectorBackend) error {
+	type closer interface {
+		Close() error
+	}
+	if closeable, ok := backend.(closer); ok {
+		return closeable.Close()
+	}
+	return nil
 }
 
 func normalizeTopK(requested int, corpusSize int) (int, error) {
@@ -278,6 +331,7 @@ func fixtureTexts(chunks []fixtureChunk) []string {
 
 func buildFixtureRecords(
 	namespace string,
+	backend string,
 	chunks []fixtureChunk,
 	embeddings [][]float32,
 ) ([]indexing.VectorRecord, error) {
@@ -285,29 +339,34 @@ func buildFixtureRecords(
 	if namespace == "" {
 		return nil, errors.New("namespace must be non-empty")
 	}
+	backend = strings.ToLower(strings.TrimSpace(backend))
 	if len(chunks) != len(embeddings) {
 		return nil, fmt.Errorf("fixture/embedding count mismatch: chunks=%d embeddings=%d", len(chunks), len(embeddings))
 	}
 
 	records := make([]indexing.VectorRecord, 0, len(chunks))
 	for index, chunk := range chunks {
-		id := strings.TrimSpace(chunk.ID)
-		if id == "" {
+		sourceID := strings.TrimSpace(chunk.ID)
+		if sourceID == "" {
 			return nil, fmt.Errorf("fixture at index %d is missing id", index)
 		}
 		if len(embeddings[index]) == 0 {
-			return nil, fmt.Errorf("fixture %q returned empty embedding", id)
+			return nil, fmt.Errorf("fixture %q returned empty embedding", sourceID)
+		}
+		recordID := sourceID
+		if backend == "qdrant" {
+			recordID = qdrantPointID(sourceID)
 		}
 
 		records = append(records, indexing.VectorRecord{
-			ID:        id,
+			ID:        recordID,
 			Namespace: namespace,
 			Embedding: cloneEmbedding(embeddings[index]),
 			Metadata: indexing.VectorMetadata{
 				Repo:      "vector-smoke-fixtures",
 				Path:      chunk.Path,
 				Language:  chunk.Language,
-				ChunkID:   id,
+				ChunkID:   sourceID,
 				ChunkText: chunk.Text,
 				StartLine: chunk.StartLine,
 				EndLine:   chunk.EndLine,
@@ -319,6 +378,17 @@ func buildFixtureRecords(
 	}
 
 	return records, nil
+}
+
+func qdrantPointID(sourceID string) string {
+	sum := sha1.Sum([]byte(sourceID))
+	uuid := sum[:16]
+
+	// RFC 4122 variant/version bits for deterministic UUID-like ids.
+	uuid[6] = (uuid[6] & 0x0f) | 0x50
+	uuid[8] = (uuid[8] & 0x3f) | 0x80
+
+	return fmt.Sprintf("%x-%x-%x-%x-%x", uuid[0:4], uuid[4:6], uuid[6:8], uuid[8:10], uuid[10:16])
 }
 
 func cloneEmbedding(embedding []float32) []float32 {
@@ -350,7 +420,13 @@ func printSmokeSummary(
 	fmt.Printf("- embedding provider: %s\n", strings.ToLower(strings.TrimSpace(cfg.EmbeddingProvider)))
 	fmt.Printf("- embedding model: %s\n", cfg.EmbeddingModel)
 	fmt.Printf("- ollama base url: %s\n", cfg.OllamaBaseURL)
-	fmt.Printf("- storage path: %s\n", cfg.StoragePath)
+	switch strings.ToLower(strings.TrimSpace(cfg.VectorBackend)) {
+	case "qdrant":
+		fmt.Printf("- qdrant url: %s\n", cfg.QdrantURL)
+		fmt.Printf("- qdrant collection: %s\n", cfg.QdrantCollection)
+	default:
+		fmt.Printf("- storage path: %s\n", cfg.StoragePath)
+	}
 	fmt.Printf("- namespace: %s\n", namespace)
 	fmt.Printf("- indexed fixture chunks: %d\n", indexedCount)
 	fmt.Printf("- query: %q\n", query)
