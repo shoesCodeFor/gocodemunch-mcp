@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -37,6 +38,8 @@ type Adapter struct {
 	bootstrapped        bool
 	collectionVectorDim int
 }
+
+var _ indexing.VectorBackend = (*Adapter)(nil)
 
 // AdapterOption customizes adapter construction.
 type AdapterOption func(*Adapter)
@@ -103,6 +106,99 @@ type qdrantSearchResponse struct {
 	Status any                 `json:"status"`
 	Result []qdrantSearchPoint `json:"result"`
 	Time   float64             `json:"time"`
+}
+
+type qdrantPointLookupRequest struct {
+	IDs         []string `json:"ids"`
+	WithPayload bool     `json:"with_payload"`
+	WithVector  bool     `json:"with_vector"`
+}
+
+type qdrantPointLookupPoint struct {
+	ID      any             `json:"id"`
+	Payload map[string]any  `json:"payload"`
+	Vector  json.RawMessage `json:"vector"`
+}
+
+type qdrantPointLookupResponse struct {
+	Status any                      `json:"status"`
+	Result []qdrantPointLookupPoint `json:"result"`
+	Time   float64                  `json:"time"`
+}
+
+type qdrantDeleteByIDsRequest struct {
+	Points []string `json:"points"`
+}
+
+type qdrantDeleteByFilterRequest struct {
+	Filter qdrantFilter `json:"filter"`
+}
+
+type qdrantCountRequest struct {
+	Filter qdrantFilter `json:"filter,omitempty"`
+	Exact  bool         `json:"exact"`
+}
+
+type qdrantCountResult struct {
+	Count any `json:"count"`
+}
+
+type qdrantCountResponse struct {
+	Status any               `json:"status"`
+	Result qdrantCountResult `json:"result"`
+	Time   float64           `json:"time"`
+}
+
+type qdrantError struct {
+	operation  string
+	err        error
+	retryable  bool
+	statusCode int
+}
+
+func (e *qdrantError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.err == nil {
+		return e.operation
+	}
+	if e.operation == "" {
+		return e.err.Error()
+	}
+	return fmt.Sprintf("%s: %v", e.operation, e.err)
+}
+
+func (e *qdrantError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+func (e *qdrantError) Retryable() bool {
+	if e == nil {
+		return false
+	}
+	return e.retryable
+}
+
+func (e *qdrantError) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.statusCode
+}
+
+func newQdrantError(operation string, err error, retryable bool) error {
+	if err == nil {
+		return nil
+	}
+	return &qdrantError{
+		operation: operation,
+		err:       err,
+		retryable: retryable,
+	}
 }
 
 // NewAdapter builds a Qdrant vector adapter.
@@ -310,16 +406,7 @@ func (a *Adapter) Query(
 		Limit:       request.TopK,
 		WithPayload: true,
 		WithVector:  true,
-		Filter: qdrantFilter{
-			Must: []qdrantFilterMatch{
-				{
-					Key: defaultNamespacePayloadField,
-					Match: qdrantMatchClause{
-						Value: namespace,
-					},
-				},
-			},
-		},
+		Filter:      namespaceFilter(namespace),
 	}
 
 	statusCode, responseBody, err := a.doJSONRequest(
@@ -417,6 +504,246 @@ func (a *Adapter) Query(
 		matches = matches[:request.TopK]
 	}
 	return indexing.VectorQueryResponse{Matches: matches}, nil
+}
+
+// Delete removes one or more explicit vector IDs from a namespace.
+func (a *Adapter) Delete(
+	ctx context.Context,
+	request indexing.VectorDeleteRequest,
+) (indexing.VectorDeleteResponse, error) {
+	namespace, err := normalizeNamespace(request.Namespace)
+	if err != nil {
+		return indexing.VectorDeleteResponse{}, fmt.Errorf("delete vectors: %w", err)
+	}
+	if len(request.IDs) == 0 {
+		return indexing.VectorDeleteResponse{Deleted: 0}, nil
+	}
+	if a == nil {
+		return indexing.VectorDeleteResponse{}, errors.New("delete vectors: qdrant adapter is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return indexing.VectorDeleteResponse{}, err
+	}
+
+	ids := normalizeIDs(request.IDs)
+	if len(ids) == 0 {
+		return indexing.VectorDeleteResponse{}, errors.New(
+			"delete vectors: ids must include at least one non-empty value",
+		)
+	}
+
+	_, exists, err := a.readCollectionVectorDimension(ctx)
+	if err != nil {
+		return indexing.VectorDeleteResponse{}, fmt.Errorf("delete vectors: %w", err)
+	}
+	if !exists {
+		return indexing.VectorDeleteResponse{Deleted: 0}, nil
+	}
+
+	lookupRequest := qdrantPointLookupRequest{
+		IDs:         ids,
+		WithPayload: true,
+		WithVector:  false,
+	}
+	statusCode, responseBody, err := a.doJSONRequest(
+		ctx,
+		http.MethodPost,
+		a.collectionEndpoint("points"),
+		lookupRequest,
+	)
+	if err != nil {
+		return indexing.VectorDeleteResponse{}, fmt.Errorf("delete vectors: %w", err)
+	}
+	if statusCode == http.StatusNotFound {
+		return indexing.VectorDeleteResponse{Deleted: 0}, nil
+	}
+	if err := ensureQdrantSuccess(statusCode, responseBody); err != nil {
+		return indexing.VectorDeleteResponse{}, fmt.Errorf(
+			"delete vectors: load records for namespace filter: %w",
+			err,
+		)
+	}
+
+	lookupResponse := qdrantPointLookupResponse{}
+	if err := json.Unmarshal(responseBody, &lookupResponse); err != nil {
+		return indexing.VectorDeleteResponse{}, fmt.Errorf(
+			"delete vectors: decode point lookup response: %w",
+			err,
+		)
+	}
+	if !qdrantStatusOK(lookupResponse.Status) {
+		return indexing.VectorDeleteResponse{}, fmt.Errorf(
+			"delete vectors: load records for namespace filter: %s",
+			qdrantStatusMessage(lookupResponse.Status),
+		)
+	}
+
+	filteredIDs := make([]string, 0, len(lookupResponse.Result))
+	seen := make(map[string]struct{}, len(lookupResponse.Result))
+	for _, point := range lookupResponse.Result {
+		id, err := normalizePointID(point.ID)
+		if err != nil {
+			return indexing.VectorDeleteResponse{}, fmt.Errorf("delete vectors: %w", err)
+		}
+		if recordNamespace := strings.TrimSpace(readStringValue(point.Payload, defaultNamespacePayloadField)); recordNamespace != namespace {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		filteredIDs = append(filteredIDs, id)
+	}
+	if len(filteredIDs) == 0 {
+		return indexing.VectorDeleteResponse{Deleted: 0}, nil
+	}
+	sort.Strings(filteredIDs)
+
+	statusCode, responseBody, err = a.doJSONRequest(
+		ctx,
+		http.MethodPost,
+		a.collectionEndpoint("points", "delete")+"?wait=true",
+		qdrantDeleteByIDsRequest{Points: filteredIDs},
+	)
+	if err != nil {
+		return indexing.VectorDeleteResponse{}, fmt.Errorf("delete vectors: %w", err)
+	}
+	if statusCode == http.StatusNotFound {
+		return indexing.VectorDeleteResponse{Deleted: 0}, nil
+	}
+	if err := ensureQdrantSuccess(statusCode, responseBody); err != nil {
+		return indexing.VectorDeleteResponse{}, fmt.Errorf("delete vectors: execute delete request: %w", err)
+	}
+
+	return indexing.VectorDeleteResponse{Deleted: len(filteredIDs)}, nil
+}
+
+// DeleteNamespace removes all records from one namespace.
+func (a *Adapter) DeleteNamespace(
+	ctx context.Context,
+	request indexing.VectorDeleteNamespaceRequest,
+) (indexing.VectorDeleteNamespaceResponse, error) {
+	namespace, err := normalizeNamespace(request.Namespace)
+	if err != nil {
+		return indexing.VectorDeleteNamespaceResponse{}, fmt.Errorf("delete vector namespace: %w", err)
+	}
+	if a == nil {
+		return indexing.VectorDeleteNamespaceResponse{}, errors.New(
+			"delete vector namespace: qdrant adapter is nil",
+		)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return indexing.VectorDeleteNamespaceResponse{}, err
+	}
+
+	_, exists, err := a.readCollectionVectorDimension(ctx)
+	if err != nil {
+		return indexing.VectorDeleteNamespaceResponse{}, fmt.Errorf(
+			"delete vector namespace: %w",
+			err,
+		)
+	}
+	if !exists {
+		return indexing.VectorDeleteNamespaceResponse{Deleted: 0}, nil
+	}
+
+	deleted, err := a.countNamespacePoints(ctx, namespace)
+	if err != nil {
+		return indexing.VectorDeleteNamespaceResponse{}, fmt.Errorf(
+			"delete vector namespace: %w",
+			err,
+		)
+	}
+	if deleted == 0 {
+		return indexing.VectorDeleteNamespaceResponse{Deleted: 0}, nil
+	}
+
+	statusCode, responseBody, err := a.doJSONRequest(
+		ctx,
+		http.MethodPost,
+		a.collectionEndpoint("points", "delete")+"?wait=true",
+		qdrantDeleteByFilterRequest{
+			Filter: namespaceFilter(namespace),
+		},
+	)
+	if err != nil {
+		return indexing.VectorDeleteNamespaceResponse{}, fmt.Errorf("delete vector namespace: %w", err)
+	}
+	if statusCode == http.StatusNotFound {
+		return indexing.VectorDeleteNamespaceResponse{Deleted: 0}, nil
+	}
+	if err := ensureQdrantSuccess(statusCode, responseBody); err != nil {
+		return indexing.VectorDeleteNamespaceResponse{}, fmt.Errorf(
+			"delete vector namespace: execute namespace delete: %w",
+			err,
+		)
+	}
+
+	return indexing.VectorDeleteNamespaceResponse{Deleted: deleted}, nil
+}
+
+// Health reports backend readiness and diagnostics.
+func (a *Adapter) Health(ctx context.Context) (indexing.VectorHealthResponse, error) {
+	if a == nil {
+		return indexing.VectorHealthResponse{
+			Ready:   false,
+			Message: "qdrant adapter is nil",
+		}, errors.New("qdrant adapter is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return indexing.VectorHealthResponse{}, err
+	}
+
+	metadata := map[string]any{
+		"backend":    "qdrant",
+		"base_url":   a.baseURL,
+		"collection": a.collection,
+	}
+
+	statusCode, responseBody, err := a.doJSONRequest(ctx, http.MethodGet, "/collections", nil)
+	if err != nil {
+		return indexing.VectorHealthResponse{
+			Ready:    false,
+			Message:  "qdrant api ping failed",
+			Metadata: metadata,
+		}, fmt.Errorf("vector health check: qdrant api ping failed: %w", err)
+	}
+	if err := ensureQdrantSuccess(statusCode, responseBody); err != nil {
+		return indexing.VectorHealthResponse{
+			Ready:    false,
+			Message:  "qdrant api ping failed",
+			Metadata: metadata,
+		}, fmt.Errorf("vector health check: qdrant api ping failed: %w", err)
+	}
+
+	vectorDimension, collectionExists, err := a.readCollectionVectorDimension(ctx)
+	if err != nil {
+		return indexing.VectorHealthResponse{
+			Ready:    false,
+			Message:  "qdrant collection check failed",
+			Metadata: metadata,
+		}, fmt.Errorf("vector health check: qdrant collection check failed: %w", err)
+	}
+
+	metadata["collection_exists"] = collectionExists
+	if collectionExists {
+		metadata["vector_dimension"] = vectorDimension
+	}
+
+	return indexing.VectorHealthResponse{
+		Ready:    true,
+		Message:  "ok",
+		Metadata: metadata,
+	}, nil
 }
 
 func (a *Adapter) ensureCollection(ctx context.Context, vectorDimension int) error {
@@ -520,6 +847,44 @@ func (a *Adapter) readCollectionVectorDimension(ctx context.Context) (int, bool,
 	return vectorDimension, true, nil
 }
 
+func (a *Adapter) countNamespacePoints(ctx context.Context, namespace string) (int, error) {
+	statusCode, responseBody, err := a.doJSONRequest(
+		ctx,
+		http.MethodPost,
+		a.collectionEndpoint("points", "count"),
+		qdrantCountRequest{
+			Filter: namespaceFilter(namespace),
+			Exact:  true,
+		},
+	)
+	if err != nil {
+		return 0, err
+	}
+	if statusCode == http.StatusNotFound {
+		return 0, nil
+	}
+	if err := ensureQdrantSuccess(statusCode, responseBody); err != nil {
+		return 0, fmt.Errorf("count namespace points: %w", err)
+	}
+
+	countResponse := qdrantCountResponse{}
+	if err := json.Unmarshal(responseBody, &countResponse); err != nil {
+		return 0, fmt.Errorf("count namespace points: decode count response: %w", err)
+	}
+	if !qdrantStatusOK(countResponse.Status) {
+		return 0, fmt.Errorf(
+			"count namespace points: qdrant response status not ok: %s",
+			qdrantStatusMessage(countResponse.Status),
+		)
+	}
+
+	count, err := decodeNonNegativeInt(countResponse.Result.Count)
+	if err != nil {
+		return 0, fmt.Errorf("count namespace points: decode count: %w", err)
+	}
+	return count, nil
+}
+
 func (a *Adapter) doJSONRequest(
 	ctx context.Context,
 	method string,
@@ -540,7 +905,7 @@ func (a *Adapter) doJSONRequest(
 	if requestBody != nil {
 		encoded, err := json.Marshal(requestBody)
 		if err != nil {
-			return 0, nil, fmt.Errorf("encode request body: %w", err)
+			return 0, nil, newQdrantError("encode request body", err, false)
 		}
 		bodyReader = bytes.NewReader(encoded)
 	}
@@ -548,7 +913,7 @@ func (a *Adapter) doJSONRequest(
 	endpointURL := a.resolveEndpoint(endpoint)
 	request, err := http.NewRequestWithContext(ctx, method, endpointURL, bodyReader)
 	if err != nil {
-		return 0, nil, fmt.Errorf("build request: %w", err)
+		return 0, nil, newQdrantError("build request", err, false)
 	}
 	request.Header.Set("Accept", "application/json")
 	if requestBody != nil {
@@ -560,13 +925,17 @@ func (a *Adapter) doJSONRequest(
 
 	response, err := a.client.Do(request)
 	if err != nil {
-		return 0, nil, fmt.Errorf("execute request: %w", err)
+		return 0, nil, newQdrantError("execute request", err, isRetryableTransportError(err))
 	}
 	defer response.Body.Close()
 
 	responseBody, err := io.ReadAll(io.LimitReader(response.Body, defaultResponseLimitBytes))
 	if err != nil {
-		return response.StatusCode, nil, fmt.Errorf("read response body: %w", err)
+		return response.StatusCode, nil, newQdrantError(
+			"read response body",
+			err,
+			isRetryableTransportError(err),
+		)
 	}
 
 	return response.StatusCode, responseBody, nil
@@ -599,20 +968,56 @@ func (a *Adapter) collectionEndpoint(parts ...string) string {
 	return strings.Join(segments, "/")
 }
 
+func namespaceFilter(namespace string) qdrantFilter {
+	return qdrantFilter{
+		Must: []qdrantFilterMatch{
+			{
+				Key: defaultNamespacePayloadField,
+				Match: qdrantMatchClause{
+					Value: namespace,
+				},
+			},
+		},
+	}
+}
+
 func ensureQdrantSuccess(statusCode int, responseBody []byte) error {
 	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("qdrant returned status %d: %s", statusCode, summarizeResponseBody(responseBody))
+		return &qdrantError{
+			err: fmt.Errorf(
+				"qdrant returned status %d: %s",
+				statusCode,
+				summarizeQdrantStatusBody(responseBody),
+			),
+			retryable:  isRetryableHTTPStatus(statusCode),
+			statusCode: statusCode,
+		}
 	}
 
 	envelope := qdrantEnvelope{}
 	if err := json.Unmarshal(responseBody, &envelope); err != nil {
-		return fmt.Errorf("decode qdrant response: %w", err)
+		return newQdrantError("decode qdrant response", err, false)
 	}
 	if !qdrantStatusOK(envelope.Status) {
-		return fmt.Errorf("qdrant response status not ok: %s", qdrantStatusMessage(envelope.Status))
+		return newQdrantError(
+			"qdrant response status not ok",
+			errors.New(qdrantStatusMessage(envelope.Status)),
+			false,
+		)
 	}
 
 	return nil
+}
+
+func summarizeQdrantStatusBody(responseBody []byte) string {
+	envelope := qdrantEnvelope{}
+	if err := json.Unmarshal(responseBody, &envelope); err == nil {
+		if message := strings.TrimSpace(qdrantStatusMessage(envelope.Status)); message != "" &&
+			!strings.EqualFold(message, "ok") {
+			return message
+		}
+	}
+	return summarizeResponseBody(responseBody)
 }
 
 func qdrantStatusOK(status any) bool {
@@ -737,12 +1142,76 @@ func decodePositiveInt(raw any) (int, error) {
 	}
 }
 
+func decodeNonNegativeInt(raw any) (int, error) {
+	switch typed := raw.(type) {
+	case int:
+		if typed < 0 {
+			return 0, fmt.Errorf("value must be non-negative (got %d)", typed)
+		}
+		return typed, nil
+	case int64:
+		if typed < 0 {
+			return 0, fmt.Errorf("value must be non-negative (got %d)", typed)
+		}
+		return int(typed), nil
+	case float64:
+		if typed < 0 {
+			return 0, fmt.Errorf("value must be non-negative (got %f)", typed)
+		}
+		if math.Trunc(typed) != typed {
+			return 0, fmt.Errorf("value must be an integer (got %f)", typed)
+		}
+		return int(typed), nil
+	case json.Number:
+		parsed, err := typed.Int64()
+		if err != nil {
+			return 0, fmt.Errorf("parse integer: %w", err)
+		}
+		if parsed < 0 {
+			return 0, fmt.Errorf("value must be non-negative (got %d)", parsed)
+		}
+		return int(parsed), nil
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(typed))
+		if err != nil {
+			return 0, fmt.Errorf("parse integer: %w", err)
+		}
+		if parsed < 0 {
+			return 0, fmt.Errorf("value must be non-negative (got %d)", parsed)
+		}
+		return parsed, nil
+	default:
+		return 0, fmt.Errorf("unsupported integer type %T", raw)
+	}
+}
+
 func normalizeNamespace(namespace string) (string, error) {
 	trimmed := strings.TrimSpace(namespace)
 	if trimmed == "" {
 		return "", errors.New("namespace must be non-empty")
 	}
 	return trimmed, nil
+}
+
+func normalizeIDs(ids []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(ids))
+	normalized := make([]string, 0, len(ids))
+	for _, id := range ids {
+		trimmed := strings.TrimSpace(id)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		normalized = append(normalized, trimmed)
+	}
+	sort.Strings(normalized)
+	return normalized
 }
 
 func validateEmbedding(embedding []float32) error {
@@ -908,6 +1377,44 @@ func decodeFloat32(raw any) (float32, error) {
 		return float32(typed), nil
 	default:
 		return 0, fmt.Errorf("unsupported numeric type %T", raw)
+	}
+}
+
+func isRetryableTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+
+	var timeoutErr interface{ Timeout() bool }
+	if errors.As(err, &timeoutErr) && timeoutErr.Timeout() {
+		return true
+	}
+
+	var temporaryErr interface{ Temporary() bool }
+	if errors.As(err, &temporaryErr) && temporaryErr.Temporary() {
+		return true
+	}
+
+	return false
+}
+
+func isRetryableHTTPStatus(statusCode int) bool {
+	switch statusCode {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return true
+	default:
+		return statusCode >= http.StatusInternalServerError
 	}
 }
 
