@@ -20,6 +20,8 @@ const (
 	defaultEmbeddingProvider    = "ollama"
 	defaultEmbeddingModel       = "bge-m3"
 	defaultOllamaBaseURL        = "http://host.docker.internal:11434"
+	defaultVLLMBaseURL          = "http://localhost:8000/v1"
+	defaultVLLMModel            = "bge-m3"
 	defaultQdrantURL            = "http://localhost:6333"
 	defaultQdrantCollection     = "gocodemunch_vectors"
 	defaultStorageDirName       = ".code-index"
@@ -70,6 +72,12 @@ type Config struct {
 	EmbeddingModel string
 	// OllamaBaseURL is the HTTP base URL for Ollama embedding requests.
 	OllamaBaseURL string
+	// VLLMBaseURL is the HTTP base URL for vLLM OpenAI-compatible embeddings.
+	VLLMBaseURL string
+	// VLLMModel is the model identifier used for vLLM embedding requests.
+	VLLMModel string
+	// VLLMAPIKey is an optional API key used for authenticated vLLM access.
+	VLLMAPIKey string
 	// QdrantURL is the HTTP base URL for Qdrant vector storage operations.
 	QdrantURL string
 	// QdrantAPIKey is an optional API key used for authenticated Qdrant access.
@@ -152,6 +160,8 @@ func Load() (Config, error) {
 		EmbeddingProvider:    defaultEmbeddingProvider,
 		EmbeddingModel:       defaultEmbeddingModel,
 		OllamaBaseURL:        defaultOllamaBaseURL,
+		VLLMBaseURL:          defaultVLLMBaseURL,
+		VLLMModel:            defaultVLLMModel,
 		QdrantURL:            defaultQdrantURL,
 		QdrantCollection:     defaultQdrantCollection,
 		FanoutItemTimeoutMS: parseNonNegativeInt(
@@ -441,13 +451,13 @@ func applyVectorEnvOverrides(cfg *Config) error {
 	if raw, ok := getenvTrimmed("EMBEDDING_PROVIDER"); ok {
 		provider := strings.ToLower(raw)
 		switch provider {
-		case "ollama":
+		case "ollama", "vllm":
 			cfg.EmbeddingProvider = provider
 		default:
 			validationErrors = append(
 				validationErrors,
 				fmt.Sprintf(
-					`EMBEDDING_PROVIDER must be one of ["ollama"] (got %q); set EMBEDDING_PROVIDER=ollama`,
+					`EMBEDDING_PROVIDER must be one of ["ollama", "vllm"] (got %q); set EMBEDDING_PROVIDER=ollama`,
 					raw,
 				),
 			)
@@ -470,6 +480,48 @@ func applyVectorEnvOverrides(cfg *Config) error {
 			)
 		} else {
 			cfg.OllamaBaseURL = raw
+		}
+	}
+
+	if raw, ok := getenvTrimmed("VLLM_BASE_URL"); ok {
+		cfg.VLLMBaseURL = raw
+	}
+
+	if raw, ok := getenvTrimmed("VLLM_MODEL"); ok {
+		cfg.VLLMModel = raw
+	}
+
+	if raw, ok := getenvTrimmed("VLLM_API_KEY"); ok {
+		cfg.VLLMAPIKey = raw
+	}
+
+	if cfg.EmbeddingProvider == "vllm" {
+		if strings.TrimSpace(cfg.VLLMBaseURL) == "" {
+			validationErrors = append(
+				validationErrors,
+				fmt.Sprintf(
+					"VLLM_BASE_URL is required when EMBEDDING_PROVIDER=vllm; set VLLM_BASE_URL=%s",
+					defaultVLLMBaseURL,
+				),
+			)
+		} else if !isHTTPBaseURL(cfg.VLLMBaseURL) {
+			validationErrors = append(
+				validationErrors,
+				fmt.Sprintf(
+					"VLLM_BASE_URL must be an absolute HTTP URL when EMBEDDING_PROVIDER=vllm (got %q); set VLLM_BASE_URL=%s",
+					cfg.VLLMBaseURL,
+					defaultVLLMBaseURL,
+				),
+			)
+		}
+		if strings.TrimSpace(cfg.VLLMModel) == "" {
+			validationErrors = append(
+				validationErrors,
+				fmt.Sprintf(
+					"VLLM_MODEL is required when EMBEDDING_PROVIDER=vllm; set VLLM_MODEL=%s",
+					defaultVLLMModel,
+				),
+			)
 		}
 	}
 
