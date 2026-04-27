@@ -12,6 +12,7 @@ import (
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/orchestration"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/orchestration/embeddings"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/storage"
+	vectorqdrant "github.com/jgravelle/gocodemunch-mcp/src/internal/storage/vector/qdrant"
 	vectorsqlite "github.com/jgravelle/gocodemunch-mcp/src/internal/storage/vector/sqlite"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/transport/mcp"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/watcher"
@@ -130,9 +131,19 @@ func buildVectorBackend(cfg config.Config) (indexing.VectorBackend, error) {
 			return nil, fmt.Errorf("initialize sqlite vector backend: %w", err)
 		}
 		return adapter, nil
+	case "qdrant":
+		adapter, err := vectorqdrant.NewAdapter(
+			cfg.QdrantURL,
+			cfg.QdrantAPIKey,
+			cfg.QdrantCollection,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("initialize qdrant vector backend: %w", err)
+		}
+		return adapter, nil
 	default:
 		return nil, fmt.Errorf(
-			"unsupported vector backend %q (set VECTOR_BACKEND=sqlite)",
+			"unsupported vector backend %q (set VECTOR_BACKEND to one of: sqlite, qdrant)",
 			cfg.VectorBackend,
 		)
 	}

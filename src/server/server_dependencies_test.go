@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/config"
+	vectorqdrant "github.com/jgravelle/gocodemunch-mcp/src/internal/storage/vector/qdrant"
 )
 
 func TestBuildDependenciesInjectsVectorBackendAndEmbedder(t *testing.T) {
@@ -50,6 +51,32 @@ func TestBuildVectorBackendRejectsUnsupportedBackend(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unsupported vector backend") {
 		t.Fatalf("expected unsupported vector backend error, got %v", err)
+	}
+}
+
+func TestBuildVectorBackendBuildsQdrantAdapter(t *testing.T) {
+	backend, err := buildVectorBackend(config.Config{
+		VectorBackend:     "qdrant",
+		QdrantURL:         "http://localhost:6333/",
+		QdrantAPIKey:      "test-key",
+		QdrantCollection:  "unit-test-vectors",
+		VectorTopK:        5,
+		StoragePath:       t.TempDir(),
+		EmbeddingProvider: "ollama",
+	})
+	if err != nil {
+		t.Fatalf("build qdrant vector backend: %v", err)
+	}
+
+	adapter, ok := backend.(*vectorqdrant.Adapter)
+	if !ok {
+		t.Fatalf("expected qdrant adapter, got %T", backend)
+	}
+	if got := adapter.BaseURL(); got != "http://localhost:6333" {
+		t.Fatalf("expected normalized qdrant base URL, got %q", got)
+	}
+	if got := adapter.Collection(); got != "unit-test-vectors" {
+		t.Fatalf("expected qdrant collection unit-test-vectors, got %q", got)
 	}
 }
 
