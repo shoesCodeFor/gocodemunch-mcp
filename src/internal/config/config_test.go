@@ -167,6 +167,62 @@ func TestVectorConfigEnvOverrides(t *testing.T) {
 	}
 }
 
+func TestVectorConfigVLLMProviderSwitching(t *testing.T) {
+	isolateConfigPath(t)
+
+	t.Setenv("EMBEDDING_PROVIDER", "VLLM")
+	t.Setenv("VLLM_BASE_URL", "https://vllm.internal/v1")
+	t.Setenv("VLLM_MODEL", "nomic-embed-text")
+	t.Setenv("VLLM_API_KEY", "test-vllm-key")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config with vllm provider: %v", err)
+	}
+	if cfg.EmbeddingProvider != "vllm" {
+		t.Fatalf("expected embedding provider vllm, got %q", cfg.EmbeddingProvider)
+	}
+	if cfg.VLLMBaseURL != "https://vllm.internal/v1" {
+		t.Fatalf("expected vllm base URL override, got %q", cfg.VLLMBaseURL)
+	}
+	if cfg.VLLMModel != "nomic-embed-text" {
+		t.Fatalf("expected vllm model override, got %q", cfg.VLLMModel)
+	}
+	if cfg.VLLMAPIKey != "test-vllm-key" {
+		t.Fatalf("expected vllm API key override, got %q", cfg.VLLMAPIKey)
+	}
+
+	t.Setenv("EMBEDDING_PROVIDER", "ollama")
+	t.Setenv("VLLM_BASE_URL", "not-a-url")
+
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("expected provider switch back to ollama to succeed: %v", err)
+	}
+	if cfg.EmbeddingProvider != "ollama" {
+		t.Fatalf("expected embedding provider ollama after switch, got %q", cfg.EmbeddingProvider)
+	}
+}
+
+func TestVectorConfigVLLMInvalidProviderError(t *testing.T) {
+	isolateConfigPath(t)
+
+	t.Setenv("EMBEDDING_PROVIDER", "openai")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected validation error for invalid embedding provider")
+	}
+
+	message := err.Error()
+	if !strings.Contains(message, "EMBEDDING_PROVIDER") {
+		t.Fatalf("expected validation message to mention EMBEDDING_PROVIDER: %q", message)
+	}
+	if !strings.Contains(message, `["ollama", "vllm"]`) {
+		t.Fatalf("expected validation message to mention allowed providers: %q", message)
+	}
+}
+
 func TestQdrantConfigDefaults(t *testing.T) {
 	isolateConfigPath(t)
 

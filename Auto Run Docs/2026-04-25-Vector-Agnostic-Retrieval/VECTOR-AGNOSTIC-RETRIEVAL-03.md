@@ -6,7 +6,8 @@ Goal: integrate vector ingestion/retrieval into normal indexing flows and add vL
 
 - [x] Extend `src/internal/config/config.go` with vLLM embedding settings (`VLLM_BASE_URL`, `VLLM_MODEL`, optional auth key) and validation rules used when `EMBEDDING_PROVIDER=vllm`.
   - Completed: Added `Config` fields and defaults for `VLLM_BASE_URL`, `VLLM_MODEL`, and optional `VLLM_API_KEY`; expanded provider validation to accept `vllm`; and added provider-gated validation rules requiring a valid HTTP `VLLM_BASE_URL` and non-empty `VLLM_MODEL` when `EMBEDDING_PROVIDER=vllm`.
-- [ ] Add vLLM config coverage in `src/internal/config/config_test.go`, including provider switching and invalid-provider errors, then run `go test ./src/internal/config -run VLLM -count=1`.
+- [x] Add vLLM config coverage in `src/internal/config/config_test.go`, including provider switching and invalid-provider errors, then run `go test ./src/internal/config -run VLLM -count=1`.
+  - Completed: Added `TestVectorConfigVLLMProviderSwitching` (vLLM <-> Ollama provider switching and provider-gated validation behavior) and `TestVectorConfigVLLMInvalidProviderError` (invalid provider message coverage), then ran `go test ./src/internal/config -run VLLM -count=1`.
 - [ ] Add `src/internal/orchestration/embeddings/vllm.go` implementing an OpenAI-compatible embedding client under the shared embedder interface.
 - [ ] Add `src/internal/orchestration/embeddings/vllm_test.go` for request mapping, timeout behavior, error mapping, and response normalization, then run `go test ./src/internal/orchestration/... -run VLLM -count=1`.
 - [ ] Add a deterministic chunking helper in `src/internal/orchestration` (or `src/internal/domain/indexing`) that converts indexed file content into stable chunks with source metadata.
