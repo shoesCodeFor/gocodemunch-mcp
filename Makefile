@@ -1,9 +1,11 @@
-.PHONY: help build build-all build-mcp build-parity build-slo-bench test smoke vector-smoke bench race fmt clean
+.PHONY: help build build-all build-mcp build-parity build-slo-bench test smoke vector-up vector-down vector-health vector-smoke bench race fmt clean
 
 BINDIR := bin
 MCP_BIN := $(BINDIR)/gocodemunch-mcp
 PARITY_BIN := $(BINDIR)/gocodemunch-parity
 SLO_BENCH_BIN := $(BINDIR)/gocodemunch-slo-bench
+VECTOR_COMPOSE_FILE := docker-compose.vector.yml
+DOCKER_COMPOSE ?= docker compose
 
 help:
 	@printf "Common targets:\n"
@@ -14,6 +16,9 @@ help:
 	@printf "  make build-slo-bench Build $(SLO_BENCH_BIN)\n"
 	@printf "  make test           Run the full Go test suite\n"
 	@printf "  make smoke          Run stdio startup smoke test\n"
+	@printf "  make vector-up      Start local Qdrant vector stack and wait for health\n"
+	@printf "  make vector-down    Stop local Qdrant vector stack\n"
+	@printf "  make vector-health  Print and verify local Qdrant health status\n"
 	@printf "  make vector-smoke   Run local vector retrieval smoke test\n"
 	@printf "  make fmt            Run gofmt across the repo\n"
 	@printf "  make clean          Remove built binaries\n"
@@ -41,6 +46,17 @@ test:
 
 smoke:
 	go test ./tests-go -run TestStdIOServerStartupSmoke -v
+
+vector-up:
+	$(DOCKER_COMPOSE) -f $(VECTOR_COMPOSE_FILE) up -d --wait --quiet-pull
+
+vector-down:
+	$(DOCKER_COMPOSE) -f $(VECTOR_COMPOSE_FILE) down --remove-orphans
+
+vector-health:
+	@status="$$( $(DOCKER_COMPOSE) -f $(VECTOR_COMPOSE_FILE) ps --format json qdrant )"; \
+	printf '%s\n' "$$status"; \
+	echo "$$status" | grep -q '"Health":"healthy"'
 
 vector-smoke:
 	./scripts/vector-smoke.sh

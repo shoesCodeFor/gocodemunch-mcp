@@ -12,6 +12,9 @@ make build
 make build-all
 make test
 make smoke
+make vector-up
+make vector-health
+make vector-down
 make vector-smoke
 make fmt
 make clean
@@ -34,6 +37,9 @@ Compiled binaries are written to `./bin`:
 - `make build-slo-bench` – build only `bin/gocodemunch-slo-bench`
 - `make test` – run the full Go test suite
 - `make smoke` – run the stdio server startup smoke test
+- `make vector-up` – start Qdrant via `docker-compose.vector.yml` and wait for health
+- `make vector-health` – print and verify Qdrant health status from compose
+- `make vector-down` – stop and remove Qdrant compose resources
 - `make vector-smoke` – index fixture vectors and print top semantic matches
 - `make fmt` – format Go source files with `gofmt`
 - `make clean` – remove generated binaries from `bin/`

@@ -6,7 +6,8 @@ Goal: add a Qdrant backend with contract parity to sqlite and make backend switc
 
 - [x] Create `docker-compose.vector.yml` at repo root with a `qdrant` service, deterministic exposed ports, named volume persistence, and a healthcheck command suitable for automated waits.
   - Completed: Added `docker-compose.vector.yml` with `qdrant/qdrant:latest`, fixed host port mappings (`6333`, `6334`), named volume `gocodemunch_qdrant_storage`, and a `/readyz` bash TCP healthcheck validated with `docker compose -f docker-compose.vector.yml up -d --wait`.
-- [ ] Add `make vector-up`, `make vector-down`, and `make vector-health` targets in `Makefile` that use `docker-compose.vector.yml` non-interactively.
+- [x] Add `make vector-up`, `make vector-down`, and `make vector-health` targets in `Makefile` that use `docker-compose.vector.yml` non-interactively.
+  - Completed: Added targets plus `make help` wiring; `vector-up` now runs `docker compose -f docker-compose.vector.yml up -d --wait --quiet-pull`, `vector-health` prints JSON status and asserts `"Health":"healthy"`, and `vector-down` performs non-interactive teardown with `down --remove-orphans`.
 - [ ] Extend `src/internal/config/config.go` with Qdrant settings (`QDRANT_URL`, `QDRANT_API_KEY`, `QDRANT_COLLECTION`) and validation for required values when `VECTOR_BACKEND=qdrant`.
 - [ ] Add Qdrant config tests in `src/internal/config/config_test.go` for defaults, env overrides, and validation errors, then run `go test ./src/internal/config -run Qdrant -count=1`.
 - [ ] Add `src/internal/storage/vector/qdrant/adapter.go` to implement collection bootstrap, `Upsert`, and `Query` compatible with shared vector contracts.
