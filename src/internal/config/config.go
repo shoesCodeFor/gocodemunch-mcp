@@ -20,6 +20,8 @@ const (
 	defaultEmbeddingProvider    = "ollama"
 	defaultEmbeddingModel       = "bge-m3"
 	defaultOllamaBaseURL        = "http://host.docker.internal:11434"
+	defaultQdrantURL            = "http://localhost:6333"
+	defaultQdrantCollection     = "gocodemunch_vectors"
 	defaultStorageDirName       = ".code-index"
 	globalConfigFileName        = "config.jsonc"
 	projectConfigFileName       = ".jcodemunch.jsonc"
@@ -68,6 +70,12 @@ type Config struct {
 	EmbeddingModel string
 	// OllamaBaseURL is the HTTP base URL for Ollama embedding requests.
 	OllamaBaseURL string
+	// QdrantURL is the HTTP base URL for Qdrant vector storage operations.
+	QdrantURL string
+	// QdrantAPIKey is an optional API key used for authenticated Qdrant access.
+	QdrantAPIKey string
+	// QdrantCollection is the target Qdrant collection name for vector records.
+	QdrantCollection string
 	// FanoutItemTimeoutMS bounds each batch item execution in milliseconds.
 	// Zero disables per-item timeout budgeting.
 	FanoutItemTimeoutMS int
@@ -144,6 +152,8 @@ func Load() (Config, error) {
 		EmbeddingProvider:    defaultEmbeddingProvider,
 		EmbeddingModel:       defaultEmbeddingModel,
 		OllamaBaseURL:        defaultOllamaBaseURL,
+		QdrantURL:            defaultQdrantURL,
+		QdrantCollection:     defaultQdrantCollection,
 		FanoutItemTimeoutMS: parseNonNegativeInt(
 			os.Getenv("GOCODEMUNCH_FANOUT_ITEM_TIMEOUT_MS"),
 			defaultFanoutItemTimeoutMS,
@@ -383,13 +393,13 @@ func applyVectorEnvOverrides(cfg *Config) error {
 	if raw, ok := getenvTrimmed("VECTOR_BACKEND"); ok {
 		backend := strings.ToLower(raw)
 		switch backend {
-		case "sqlite":
+		case "sqlite", "qdrant":
 			cfg.VectorBackend = backend
 		default:
 			validationErrors = append(
 				validationErrors,
 				fmt.Sprintf(
-					`VECTOR_BACKEND must be one of ["sqlite"] (got %q); set VECTOR_BACKEND=sqlite`,
+					`VECTOR_BACKEND must be one of ["sqlite", "qdrant"] (got %q); set VECTOR_BACKEND=sqlite`,
 					raw,
 				),
 			)
@@ -449,8 +459,7 @@ func applyVectorEnvOverrides(cfg *Config) error {
 	}
 
 	if raw, ok := getenvTrimmed("OLLAMA_BASE_URL"); ok {
-		parsed, err := url.Parse(raw)
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		if !isHTTPBaseURL(raw) {
 			validationErrors = append(
 				validationErrors,
 				fmt.Sprintf(
@@ -460,19 +469,51 @@ func applyVectorEnvOverrides(cfg *Config) error {
 				),
 			)
 		} else {
-			switch strings.ToLower(parsed.Scheme) {
-			case "http", "https":
-				cfg.OllamaBaseURL = raw
-			default:
-				validationErrors = append(
-					validationErrors,
-					fmt.Sprintf(
-						"OLLAMA_BASE_URL must use http or https (got %q); set OLLAMA_BASE_URL=%s",
-						raw,
-						defaultOllamaBaseURL,
-					),
-				)
-			}
+			cfg.OllamaBaseURL = raw
+		}
+	}
+
+	if raw, ok := getenvTrimmed("QDRANT_URL"); ok {
+		if !isHTTPBaseURL(raw) {
+			validationErrors = append(
+				validationErrors,
+				fmt.Sprintf(
+					"QDRANT_URL must be an absolute HTTP URL (got %q); set QDRANT_URL=%s",
+					raw,
+					defaultQdrantURL,
+				),
+			)
+		} else {
+			cfg.QdrantURL = raw
+		}
+	}
+
+	if raw, ok := getenvTrimmed("QDRANT_API_KEY"); ok {
+		cfg.QdrantAPIKey = raw
+	}
+
+	if raw, ok := getenvTrimmed("QDRANT_COLLECTION"); ok {
+		cfg.QdrantCollection = raw
+	}
+
+	if cfg.VectorBackend == "qdrant" {
+		if strings.TrimSpace(cfg.QdrantURL) == "" {
+			validationErrors = append(
+				validationErrors,
+				fmt.Sprintf(
+					"QDRANT_URL is required when VECTOR_BACKEND=qdrant; set QDRANT_URL=%s",
+					defaultQdrantURL,
+				),
+			)
+		}
+		if strings.TrimSpace(cfg.QdrantCollection) == "" {
+			validationErrors = append(
+				validationErrors,
+				fmt.Sprintf(
+					"QDRANT_COLLECTION is required when VECTOR_BACKEND=qdrant; set QDRANT_COLLECTION=%s",
+					defaultQdrantCollection,
+				),
+			)
 		}
 	}
 
@@ -480,6 +521,19 @@ func applyVectorEnvOverrides(cfg *Config) error {
 		return nil
 	}
 	return fmt.Errorf("vector configuration validation failed: %s", strings.Join(validationErrors, "; "))
+}
+
+func isHTTPBaseURL(raw string) bool {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return false
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "http", "https":
+		return true
+	default:
+		return false
+	}
 }
 
 func getenvTrimmed(key string) (string, bool) {
