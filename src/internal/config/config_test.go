@@ -167,6 +167,77 @@ func TestVectorConfigEnvOverrides(t *testing.T) {
 	}
 }
 
+func TestQdrantConfigDefaults(t *testing.T) {
+	isolateConfigPath(t)
+
+	t.Setenv("VECTOR_BACKEND", "")
+	t.Setenv("QDRANT_URL", "")
+	t.Setenv("QDRANT_API_KEY", "")
+	t.Setenv("QDRANT_COLLECTION", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.QdrantURL != defaultQdrantURL {
+		t.Fatalf("expected default qdrant URL %q, got %q", defaultQdrantURL, cfg.QdrantURL)
+	}
+	if cfg.QdrantAPIKey != "" {
+		t.Fatalf("expected default qdrant API key to be empty, got %q", cfg.QdrantAPIKey)
+	}
+	if cfg.QdrantCollection != defaultQdrantCollection {
+		t.Fatalf(
+			"expected default qdrant collection %q, got %q",
+			defaultQdrantCollection,
+			cfg.QdrantCollection,
+		)
+	}
+}
+
+func TestQdrantConfigEnvOverrides(t *testing.T) {
+	isolateConfigPath(t)
+
+	t.Setenv("VECTOR_BACKEND", "QDRANT")
+	t.Setenv("QDRANT_URL", "https://qdrant.internal:6333")
+	t.Setenv("QDRANT_API_KEY", "test-token")
+	t.Setenv("QDRANT_COLLECTION", "team-vectors")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.VectorBackend != "qdrant" {
+		t.Fatalf("expected vector backend qdrant, got %q", cfg.VectorBackend)
+	}
+	if cfg.QdrantURL != "https://qdrant.internal:6333" {
+		t.Fatalf("expected qdrant URL override, got %q", cfg.QdrantURL)
+	}
+	if cfg.QdrantAPIKey != "test-token" {
+		t.Fatalf("expected qdrant API key override, got %q", cfg.QdrantAPIKey)
+	}
+	if cfg.QdrantCollection != "team-vectors" {
+		t.Fatalf("expected qdrant collection override, got %q", cfg.QdrantCollection)
+	}
+}
+
+func TestQdrantConfigValidationErrors(t *testing.T) {
+	t.Setenv("VECTOR_BACKEND", "qdrant")
+	t.Setenv("QDRANT_URL", "")
+	t.Setenv("QDRANT_COLLECTION", "")
+
+	err := applyVectorEnvOverrides(&Config{})
+	if err == nil {
+		t.Fatal("expected validation error for missing qdrant configuration")
+	}
+
+	message := err.Error()
+	for _, field := range []string{"QDRANT_URL", "QDRANT_COLLECTION"} {
+		if !strings.Contains(message, field) {
+			t.Fatalf("expected validation message to mention %s: %q", field, message)
+		}
+	}
+}
+
 func TestLoadVectorEnvironmentValidationErrors(t *testing.T) {
 	isolateConfigPath(t)
 
