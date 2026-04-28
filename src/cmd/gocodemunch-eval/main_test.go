@@ -474,6 +474,73 @@ func TestRunWithArgsWritesMarkdownReportWithFrontMatter(t *testing.T) {
 			t.Fatalf("expected markdown report to include %q\nfull report:\n%s", expected, content)
 		}
 	}
+
+	indexPath := filepath.Join(filepath.Dir(reportDir), evalIndexFileName)
+	indexBytes, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatalf("read eval index file: %v", err)
+	}
+	indexContent := string(indexBytes)
+	for _, expected := range []string{
+		"type: reference",
+		"title: Eval Index",
+		"created: 2026-04-28",
+		"- [[20260428-100000z-eval-fixtures-test]]",
+	} {
+		if !strings.Contains(indexContent, expected) {
+			t.Fatalf("expected eval index to include %q\nfull index:\n%s", expected, indexContent)
+		}
+	}
+}
+
+func TestWriteEvalIndexListsRunsNewestFirstAndDedupes(t *testing.T) {
+	baseDir := t.TempDir()
+	reportDir := filepath.Join(baseDir, "docs", "evals", "runs")
+	if err := os.MkdirAll(reportDir, 0o755); err != nil {
+		t.Fatalf("create report dir: %v", err)
+	}
+
+	firstReportPath := filepath.Join(reportDir, "20260427-093000z-eval-fixtures-test.md")
+	if _, err := writeEvalIndex(reportDir, firstReportPath, "2026-04-27T09:30:00Z"); err != nil {
+		t.Fatalf("write first eval index: %v", err)
+	}
+
+	secondReportPath := filepath.Join(reportDir, "20260428-100000z-eval-fixtures-test.md")
+	if _, err := writeEvalIndex(reportDir, secondReportPath, "2026-04-28T10:00:00Z"); err != nil {
+		t.Fatalf("write second eval index: %v", err)
+	}
+
+	if _, err := writeEvalIndex(reportDir, secondReportPath, "2026-04-28T10:00:00Z"); err != nil {
+		t.Fatalf("write duplicate eval index entry: %v", err)
+	}
+
+	indexPath := filepath.Join(baseDir, "docs", "evals", evalIndexFileName)
+	indexBytes, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatalf("read eval index file: %v", err)
+	}
+
+	lines := strings.Split(string(indexBytes), "\n")
+	runLines := make([]string, 0, 2)
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- [[20") {
+			runLines = append(runLines, trimmed)
+		}
+	}
+
+	expectedRunLines := []string{
+		"- [[20260428-100000z-eval-fixtures-test]]",
+		"- [[20260427-093000z-eval-fixtures-test]]",
+	}
+	if len(runLines) != len(expectedRunLines) {
+		t.Fatalf("expected %d run links, got %d\nfull index:\n%s", len(expectedRunLines), len(runLines), string(indexBytes))
+	}
+	for i := range expectedRunLines {
+		if runLines[i] != expectedRunLines[i] {
+			t.Fatalf("unexpected run link order at index %d: got %q want %q\nfull index:\n%s", i, runLines[i], expectedRunLines[i], string(indexBytes))
+		}
+	}
 }
 
 func TestRunWithArgsRejectsInvalidThreshold(t *testing.T) {

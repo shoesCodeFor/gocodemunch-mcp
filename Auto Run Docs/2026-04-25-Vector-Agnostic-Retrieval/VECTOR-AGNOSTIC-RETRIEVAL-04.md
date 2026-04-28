@@ -21,7 +21,9 @@ Goal: add a repeatable, non-interactive evaluation harness with quality/performa
   - Completed: Extended `src/cmd/gocodemunch-eval/main.go` with markdown report generation (`--markdown-report-dir`, default `docs/evals/runs/`) and optional `--skip-markdown-report` for no-side-effect runs.
   - Completed: Added deterministic markdown filenames (`YYYYMMDD-HHMMSSZ-dataset.md`), YAML front matter (`type`, `title`, `created`, `tags`, `related` wiki-links), aggregate metrics table, and gate failure section.
   - Completed: Added `TestRunWithArgsWritesMarkdownReportWithFrontMatter` plus updated existing eval runner tests to explicitly skip markdown output where not under test; verified with `go test ./src/internal/evals ./src/cmd/gocodemunch-eval -count=1`.
-- [ ] Add or update `docs/evals/Eval-Index.md` so each new run report is linked via wiki-link and listed newest-first.
+- [x] Add or update `docs/evals/Eval-Index.md` so each new run report is linked via wiki-link and listed newest-first.
+  - Completed: Added `docs/evals/Eval-Index.md` with structured front matter and wiki-link index format, and updated `src/cmd/gocodemunch-eval/main.go` to automatically create/update the index on each markdown report write with deduplicated, newest-first run links.
+  - Completed: Added deterministic coverage in `src/cmd/gocodemunch-eval/main_test.go` validating eval index creation, run-link insertion, deduplication, and newest-first ordering.
 - [ ] Add `make eval-smoke`, `make eval-matrix`, and `make eval-gate` targets in `Makefile` with documented defaults and non-interactive behavior.
 - [ ] Add eval runner integration tests for threshold failures and report output determinism, then run targeted eval tests.
 - [ ] Run `make eval-smoke` and `make eval-matrix` twice, verify stable baselines, and persist initial thresholds in the repo.

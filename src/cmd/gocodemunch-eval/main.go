@@ -11,6 +11,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -28,6 +29,7 @@ const (
 	defaultFixturesDir       = "tests-go/evals/fixtures"
 	defaultNamespacePrefix   = "eval-fixtures"
 	defaultMarkdownReportDir = "docs/evals/runs"
+	evalIndexFileName        = "Eval-Index.md"
 	evalGateFailureExitCode  = 3
 )
 
@@ -174,6 +176,9 @@ var (
 	createEmbedderFn = newEmbedder
 	closeBackendFn   = closeVectorBackend
 	nowUTCFn         = func() time.Time { return time.Now().UTC() }
+	wikiLinkPattern  = regexp.MustCompile(`\[\[([^\]]+)\]\]`)
+	evalRunDocNameRe = regexp.MustCompile(`^\d{8}-\d{6}z-.+$`)
+	createdDateRe    = regexp.MustCompile(`(?m)^created:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})\s*$`)
 )
 
 func main() {
@@ -321,8 +326,13 @@ func runWithArgs(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if !*skipMarkdownReportArg {
-		if _, err := writeMarkdownRunReport(*markdownReportDirArg, report, *outPathArg); err != nil {
+		reportPath, err := writeMarkdownRunReport(*markdownReportDirArg, report, *outPathArg)
+		if err != nil {
 			fmt.Fprintf(stderr, "write markdown report: %v\n", err)
+			return 1
+		}
+		if _, err := writeEvalIndex(*markdownReportDirArg, reportPath, report.GeneratedAtUTC); err != nil {
+			fmt.Fprintf(stderr, "write eval index: %v\n", err)
 			return 1
 		}
 	}
@@ -1116,6 +1126,172 @@ func writeMarkdownRunReport(
 	}
 
 	return reportPath, nil
+}
+
+func writeEvalIndex(markdownReportDir string, markdownReportPath string, generatedAtUTC string) (string, error) {
+	reportDir := filepath.Clean(strings.TrimSpace(markdownReportDir))
+	if reportDir == "." || reportDir == "" {
+		return "", errors.New("markdown report dir must be non-empty")
+	}
+	reportName := strings.TrimSpace(markdownReportPath)
+	if reportName == "" {
+		return "", errors.New("markdown report path must be non-empty")
+	}
+
+	evalDir := filepath.Dir(reportDir)
+	if err := os.MkdirAll(evalDir, 0o755); err != nil {
+		return "", fmt.Errorf("create eval docs directory %q: %w", evalDir, err)
+	}
+	indexPath := filepath.Join(evalDir, evalIndexFileName)
+
+	links, createdDate, err := loadEvalIndexState(indexPath)
+	if err != nil {
+		return "", err
+	}
+
+	reportDocName := strings.TrimSuffix(filepath.Base(reportName), filepath.Ext(reportName))
+	if reportDocName == "" {
+		return "", errors.New("markdown report path must include a filename")
+	}
+	links = append(links, reportDocName)
+	links = uniqueEvalRunLinks(links)
+	sortEvalRunLinksNewestFirst(links)
+
+	if createdDate == "" {
+		createdDate = createdDateFromRFC3339(generatedAtUTC)
+	}
+	content := renderEvalIndexMarkdown(createdDate, links)
+	if err := os.WriteFile(indexPath, []byte(content), 0o644); err != nil {
+		return "", fmt.Errorf("write eval index %q: %w", indexPath, err)
+	}
+	return indexPath, nil
+}
+
+func loadEvalIndexState(indexPath string) ([]string, string, error) {
+	contentBytes, err := os.ReadFile(indexPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, "", nil
+		}
+		return nil, "", fmt.Errorf("read eval index %q: %w", indexPath, err)
+	}
+	content := string(contentBytes)
+
+	links := make([]string, 0)
+	matches := wikiLinkPattern.FindAllStringSubmatch(content, -1)
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		name := normalizeEvalRunDocName(match[1])
+		if name == "" {
+			continue
+		}
+		links = append(links, name)
+	}
+
+	createdDate := ""
+	if match := createdDateRe.FindStringSubmatch(content); len(match) == 2 {
+		createdDate = strings.TrimSpace(match[1])
+	}
+
+	return uniqueEvalRunLinks(links), createdDate, nil
+}
+
+func normalizeEvalRunDocName(raw string) string {
+	name := strings.TrimSpace(raw)
+	name = strings.Trim(name, "\"'")
+	name = strings.TrimSuffix(name, filepath.Ext(name))
+	name = filepath.Base(name)
+	if name == "" {
+		return ""
+	}
+	if !evalRunDocNameRe.MatchString(strings.ToLower(name)) {
+		return ""
+	}
+	return name
+}
+
+func uniqueEvalRunLinks(links []string) []string {
+	if len(links) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	ordered := make([]string, 0, len(links))
+	for _, link := range links {
+		normalized := normalizeEvalRunDocName(link)
+		if normalized == "" {
+			continue
+		}
+		if _, exists := seen[normalized]; exists {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		ordered = append(ordered, normalized)
+	}
+	return ordered
+}
+
+func sortEvalRunLinksNewestFirst(links []string) {
+	slices.SortFunc(links, func(left, right string) int {
+		leftTime, leftOK := parseEvalRunDocTime(left)
+		rightTime, rightOK := parseEvalRunDocTime(right)
+		switch {
+		case leftOK && rightOK:
+			if leftTime.After(rightTime) {
+				return -1
+			}
+			if leftTime.Before(rightTime) {
+				return 1
+			}
+		case leftOK && !rightOK:
+			return -1
+		case !leftOK && rightOK:
+			return 1
+		}
+		return strings.Compare(right, left)
+	})
+}
+
+func parseEvalRunDocTime(docName string) (time.Time, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(docName))
+	if len(normalized) < len("20060102-150405z") {
+		return time.Time{}, false
+	}
+	prefix := normalized[:len("20060102-150405z")]
+	parsed, err := time.Parse("20060102-150405z", prefix)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return parsed.UTC(), true
+}
+
+func renderEvalIndexMarkdown(createdDate string, links []string) string {
+	created := strings.TrimSpace(createdDate)
+	if created == "" {
+		created = nowUTCFn().Format("2006-01-02")
+	}
+
+	var b strings.Builder
+	b.WriteString("---\n")
+	b.WriteString("type: reference\n")
+	b.WriteString("title: Eval Index\n")
+	b.WriteString(fmt.Sprintf("created: %s\n", created))
+	b.WriteString("tags:\n")
+	b.WriteString("  - eval\n")
+	b.WriteString("  - index\n")
+	b.WriteString("related: []\n")
+	b.WriteString("---\n\n")
+	b.WriteString("# Eval Index\n\n")
+	b.WriteString("Newest-first wiki-links to reports in `docs/evals/runs`.\n\n")
+	if len(links) == 0 {
+		b.WriteString("- None yet\n")
+		return b.String()
+	}
+	for _, link := range links {
+		b.WriteString(fmt.Sprintf("- [[%s]]\n", link))
+	}
+	return b.String()
 }
 
 func buildMarkdownReportFileName(report evalRunReport) string {
