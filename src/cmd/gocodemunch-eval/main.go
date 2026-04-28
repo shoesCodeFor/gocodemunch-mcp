@@ -25,9 +25,10 @@ import (
 )
 
 const (
-	defaultFixturesDir      = "tests-go/evals/fixtures"
-	defaultNamespacePrefix  = "eval-fixtures"
-	evalGateFailureExitCode = 3
+	defaultFixturesDir       = "tests-go/evals/fixtures"
+	defaultNamespacePrefix   = "eval-fixtures"
+	defaultMarkdownReportDir = "docs/evals/runs"
+	evalGateFailureExitCode  = 3
 )
 
 const (
@@ -195,6 +196,12 @@ func runWithArgs(args []string, stdout, stderr io.Writer) int {
 	namespacePrefixArg := flags.String("namespace-prefix", defaultNamespacePrefix, "Namespace prefix used for eval fixtures")
 	keepDataArg := flags.Bool("keep-data", false, "Keep temporary sqlite data directories when CODE_INDEX_PATH is not set")
 	outPathArg := flags.String("out", "", "Optional output file path for JSON report")
+	markdownReportDirArg := flags.String(
+		"markdown-report-dir",
+		defaultMarkdownReportDir,
+		"Directory where markdown eval run reports are written",
+	)
+	skipMarkdownReportArg := flags.Bool("skip-markdown-report", false, "Skip markdown report generation")
 	minMeanRecallArg := flags.Float64(
 		"min-mean-recall-at-k",
 		math.NaN(),
@@ -309,6 +316,13 @@ func runWithArgs(args []string, stdout, stderr io.Writer) int {
 		}
 		if err := os.WriteFile(outPath, append(payload, '\n'), 0o644); err != nil {
 			fmt.Fprintf(stderr, "write report: %v\n", err)
+			return 1
+		}
+	}
+
+	if !*skipMarkdownReportArg {
+		if _, err := writeMarkdownRunReport(*markdownReportDirArg, report, *outPathArg); err != nil {
+			fmt.Fprintf(stderr, "write markdown report: %v\n", err)
 			return 1
 		}
 	}
@@ -1077,4 +1091,206 @@ func countRelevant(relevanceByDoc map[string]int) int {
 		}
 	}
 	return relevant
+}
+
+func writeMarkdownRunReport(
+	rawDir string,
+	report evalRunReport,
+	jsonOutPath string,
+) (string, error) {
+	reportDir := strings.TrimSpace(rawDir)
+	if reportDir == "" {
+		return "", errors.New("markdown report dir must be non-empty")
+	}
+	reportDir = filepath.Clean(reportDir)
+
+	if err := os.MkdirAll(reportDir, 0o755); err != nil {
+		return "", fmt.Errorf("create markdown report directory %q: %w", reportDir, err)
+	}
+
+	fileName := buildMarkdownReportFileName(report)
+	reportPath := filepath.Join(reportDir, fileName)
+	content := renderMarkdownRunReport(report, jsonOutPath)
+	if err := os.WriteFile(reportPath, []byte(content), 0o644); err != nil {
+		return "", fmt.Errorf("write markdown report %q: %w", reportPath, err)
+	}
+
+	return reportPath, nil
+}
+
+func buildMarkdownReportFileName(report evalRunReport) string {
+	timestamp := sanitizeTagValue(strings.TrimSpace(report.GeneratedAtUTC))
+	if parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(report.GeneratedAtUTC)); err == nil {
+		timestamp = strings.ToLower(parsed.UTC().Format("20060102-150405Z"))
+	}
+	if timestamp == "" {
+		timestamp = "unknown-time"
+	}
+
+	dataset := sanitizeTagValue(report.Dataset)
+	if dataset == "" {
+		dataset = "dataset"
+	}
+	return fmt.Sprintf("%s-%s.md", timestamp, dataset)
+}
+
+func renderMarkdownRunReport(report evalRunReport, jsonOutPath string) string {
+	createdDate := createdDateFromRFC3339(report.GeneratedAtUTC)
+	title := fmt.Sprintf("Eval Run %s %s", strings.TrimSpace(report.Dataset), strings.TrimSpace(report.GeneratedAtUTC))
+	tags := collectMarkdownReportTags(report)
+	relatedLinks := collectMarkdownRelatedLinks(report, jsonOutPath)
+
+	var b strings.Builder
+	b.WriteString("---\n")
+	b.WriteString("type: report\n")
+	b.WriteString(fmt.Sprintf("title: %s\n", title))
+	b.WriteString(fmt.Sprintf("created: %s\n", createdDate))
+	b.WriteString("tags:\n")
+	for _, tag := range tags {
+		b.WriteString(fmt.Sprintf("  - %s\n", tag))
+	}
+	b.WriteString("related:\n")
+	for _, link := range relatedLinks {
+		b.WriteString(fmt.Sprintf("  - '[[%s]]'\n", link))
+	}
+	b.WriteString("---\n\n")
+	b.WriteString("## Summary\n\n")
+	b.WriteString(fmt.Sprintf("- Generated (UTC): `%s`\n", report.GeneratedAtUTC))
+	b.WriteString(fmt.Sprintf("- Dataset: `%s`\n", report.Dataset))
+	b.WriteString(fmt.Sprintf("- Fixtures Dir: `%s`\n", report.FixturesDir))
+	b.WriteString(fmt.Sprintf("- Gate Passed: `%t`\n", report.GatePassed))
+	b.WriteString("\n## Aggregates\n\n")
+	b.WriteString("| Provider | Backend | Model | Mean Recall@k | Mean MRR@k | P50 Latency (ms) | P95 Latency (ms) | Gate |\n")
+	b.WriteString("| --- | --- | --- | ---: | ---: | ---: | ---: | --- |\n")
+	for _, combo := range report.Combinations {
+		b.WriteString(fmt.Sprintf(
+			"| %s | %s | %s | %.4f | %.4f | %.2f | %.2f | %t |\n",
+			combo.Provider,
+			combo.Backend,
+			combo.Model,
+			combo.Aggregate.MeanRecallAtK,
+			combo.Aggregate.MeanMRRAtK,
+			combo.Aggregate.LatencyMetrics.P50MS,
+			combo.Aggregate.LatencyMetrics.P95MS,
+			combo.Gate.Passed,
+		))
+	}
+
+	b.WriteString("\n## Gate Failures\n\n")
+	if len(report.GateFailures) == 0 {
+		b.WriteString("- None\n")
+	} else {
+		for _, failure := range report.GateFailures {
+			b.WriteString(fmt.Sprintf(
+				"- `%s/%s` %s %s %.6f (actual %.6f)\n",
+				failure.Provider,
+				failure.Backend,
+				failure.Check.Metric,
+				failure.Check.Comparator,
+				failure.Check.Target,
+				failure.Check.Actual,
+			))
+		}
+	}
+
+	return b.String()
+}
+
+func collectMarkdownReportTags(report evalRunReport) []string {
+	tagSet := map[string]struct{}{
+		"eval": {},
+	}
+	dataset := sanitizeTagValue(report.Dataset)
+	if dataset != "" {
+		tagSet["dataset-"+dataset] = struct{}{}
+	}
+	if report.GatePassed {
+		tagSet["gate-pass"] = struct{}{}
+	} else {
+		tagSet["gate-fail"] = struct{}{}
+	}
+	for _, combo := range report.Combinations {
+		if provider := sanitizeTagValue(combo.Provider); provider != "" {
+			tagSet["provider-"+provider] = struct{}{}
+		}
+		if backend := sanitizeTagValue(combo.Backend); backend != "" {
+			tagSet["backend-"+backend] = struct{}{}
+		}
+		if model := sanitizeTagValue(combo.Model); model != "" {
+			tagSet["model-"+model] = struct{}{}
+		}
+	}
+
+	tags := make([]string, 0, len(tagSet))
+	for tag := range tagSet {
+		tags = append(tags, tag)
+	}
+	slices.Sort(tags)
+	return tags
+}
+
+func collectMarkdownRelatedLinks(report evalRunReport, jsonOutPath string) []string {
+	relatedSet := map[string]struct{}{
+		"Eval-Index": {},
+	}
+	dataset := sanitizeTagValue(report.Dataset)
+	if dataset != "" {
+		relatedSet["Eval-Dataset-"+dataset] = struct{}{}
+	}
+	if outPath := strings.TrimSpace(jsonOutPath); outPath != "" {
+		baseName := strings.TrimSuffix(filepath.Base(outPath), filepath.Ext(outPath))
+		baseName = strings.TrimSpace(baseName)
+		if baseName != "" {
+			relatedSet[baseName] = struct{}{}
+		}
+	}
+
+	related := make([]string, 0, len(relatedSet))
+	for link := range relatedSet {
+		related = append(related, link)
+	}
+	slices.Sort(related)
+	return related
+}
+
+func createdDateFromRFC3339(timestamp string) string {
+	trimmed := strings.TrimSpace(timestamp)
+	if parsed, err := time.Parse(time.RFC3339, trimmed); err == nil {
+		return parsed.UTC().Format("2006-01-02")
+	}
+	if trimmed == "" {
+		return nowUTCFn().Format("2006-01-02")
+	}
+	return trimmed
+}
+
+func sanitizeTagValue(raw string) string {
+	normalized := strings.ToLower(strings.TrimSpace(raw))
+	if normalized == "" {
+		return ""
+	}
+
+	var b strings.Builder
+	b.Grow(len(normalized))
+	needsDash := false
+	for _, ch := range normalized {
+		switch {
+		case ch >= 'a' && ch <= 'z':
+			if needsDash && b.Len() > 0 {
+				b.WriteByte('-')
+			}
+			b.WriteRune(ch)
+			needsDash = false
+		case ch >= '0' && ch <= '9':
+			if needsDash && b.Len() > 0 {
+				b.WriteByte('-')
+			}
+			b.WriteRune(ch)
+			needsDash = false
+		default:
+			needsDash = true
+		}
+	}
+
+	return strings.Trim(b.String(), "-")
 }

@@ -62,7 +62,7 @@ func TestRunWithArgsEmitsPerQueryAndAggregateMetrics(t *testing.T) {
 	)
 	defer restore()
 
-	args := []string{"--fixtures-dir", fixturesDir}
+	args := []string{"--fixtures-dir", fixturesDir, "--skip-markdown-report"}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
@@ -165,7 +165,11 @@ func TestRunWithArgsRejectsUnsupportedProvider(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	code := runWithArgs([]string{"--fixtures-dir", fixturesDir, "--providers", "openai"}, &stdout, &stderr)
+	code := runWithArgs(
+		[]string{"--fixtures-dir", fixturesDir, "--providers", "openai", "--skip-markdown-report"},
+		&stdout,
+		&stderr,
+	)
 	if code != 2 {
 		t.Fatalf("expected invalid-input exit code 2, got %d", code)
 	}
@@ -199,7 +203,7 @@ func TestRunWithArgsRejectsDatasetMismatch(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	code := runWithArgs([]string{"--fixtures-dir", fixturesDir}, &stdout, &stderr)
+	code := runWithArgs([]string{"--fixtures-dir", fixturesDir, "--skip-markdown-report"}, &stdout, &stderr)
 	if code != 2 {
 		t.Fatalf("expected invalid-input exit code 2, got %d", code)
 	}
@@ -260,7 +264,7 @@ func TestRunWithArgsThresholdGateFailsWhenQualityMissed(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	code := runWithArgs([]string{"--fixtures-dir", fixturesDir}, &stdout, &stderr)
+	code := runWithArgs([]string{"--fixtures-dir", fixturesDir, "--skip-markdown-report"}, &stdout, &stderr)
 	if code != evalGateFailureExitCode {
 		t.Fatalf("expected gate failure exit code %d, got %d stderr=%s", evalGateFailureExitCode, code, stderr.String())
 	}
@@ -346,6 +350,7 @@ func TestRunWithArgsThresholdGatePassesWithFlags(t *testing.T) {
 		"--min-mean-mrr-at-k", "0.70",
 		"--max-p50-latency-ms", "5000",
 		"--max-p95-latency-ms", "5000",
+		"--skip-markdown-report",
 	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -380,6 +385,97 @@ func TestRunWithArgsThresholdGatePassesWithFlags(t *testing.T) {
 	}
 }
 
+func TestRunWithArgsWritesMarkdownReportWithFrontMatter(t *testing.T) {
+	fixturesDir := writeEvalFixtures(t, fixtureCorpus{
+		Dataset: "eval-fixtures-test",
+		Documents: []fixtureDocument{
+			{ID: "doc-a", Path: "fixtures/a.go", Language: "go", Text: "json decode"},
+			{ID: "doc-b", Path: "fixtures/b.go", Language: "go", Text: "http timeout"},
+		},
+	}, fixtureQueries{
+		Dataset: "eval-fixtures-test",
+		Queries: []fixtureRow{
+			{ID: "q-1", Query: "decode json", TopK: 2},
+		},
+	}, fixtureRelevance{
+		Dataset: "eval-fixtures-test",
+		Judgments: []fixtureJudgment{
+			{QueryID: "q-1", DocID: "doc-a", Relevance: 3},
+		},
+	})
+
+	backend := &scriptedVectorBackend{queryPlans: [][]string{
+		{"doc-a", "doc-b"},
+	}}
+
+	restore := overrideEvalRunnerHooks(
+		func() (config.Config, error) {
+			return config.Config{
+				EmbeddingProvider:    "ollama",
+				VectorBackend:        "sqlite",
+				EmbeddingModel:       "eval-test-model",
+				VectorQueryTimeoutMS: 500,
+			}, nil
+		},
+		func(config.Config, string) (indexing.VectorBackend, error) {
+			return backend, nil
+		},
+		func(config.Config, string) (indexing.Embedder, error) {
+			return staticEmbedder{}, nil
+		},
+		func(indexing.VectorBackend) error { return nil },
+		func() time.Time { return time.Date(2026, time.April, 28, 10, 0, 0, 0, time.UTC) },
+	)
+	defer restore()
+
+	reportDir := filepath.Join(t.TempDir(), "docs", "evals", "runs")
+	args := []string{
+		"--fixtures-dir", fixturesDir,
+		"--markdown-report-dir", reportDir,
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runWithArgs(args, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected success exit code 0, got %d stderr=%s", code, stderr.String())
+	}
+
+	entries, err := os.ReadDir(reportDir)
+	if err != nil {
+		t.Fatalf("read markdown report directory: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one markdown report file, got %d", len(entries))
+	}
+	if got := entries[0].Name(); got != "20260428-100000z-eval-fixtures-test.md" {
+		t.Fatalf("unexpected markdown report filename %q", got)
+	}
+
+	reportPath := filepath.Join(reportDir, entries[0].Name())
+	contentBytes, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("read markdown report file: %v", err)
+	}
+	content := string(contentBytes)
+
+	for _, expected := range []string{
+		"type: report",
+		"title: Eval Run eval-fixtures-test 2026-04-28T10:00:00Z",
+		"created: 2026-04-28",
+		"- provider-ollama",
+		"- backend-sqlite",
+		"- model-eval-test-model",
+		"- '[[Eval-Index]]'",
+		"- '[[Eval-Dataset-eval-fixtures-test]]'",
+		"| ollama | sqlite | eval-test-model |",
+		"## Gate Failures",
+	} {
+		if !strings.Contains(content, expected) {
+			t.Fatalf("expected markdown report to include %q\nfull report:\n%s", expected, content)
+		}
+	}
+}
+
 func TestRunWithArgsRejectsInvalidThreshold(t *testing.T) {
 	fixturesDir := writeEvalFixtures(t, fixtureCorpus{
 		Dataset:   "eval-fixtures-test",
@@ -409,6 +505,7 @@ func TestRunWithArgsRejectsInvalidThreshold(t *testing.T) {
 		[]string{
 			"--fixtures-dir", fixturesDir,
 			"--min-mean-recall-at-k", "1.2",
+			"--skip-markdown-report",
 		},
 		&stdout,
 		&stderr,
