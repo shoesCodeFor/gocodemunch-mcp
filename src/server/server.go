@@ -172,9 +172,20 @@ func buildEmbedder(cfg config.Config) (indexing.Embedder, error) {
 			return nil, fmt.Errorf("initialize ollama embedder: %w", err)
 		}
 		return embedder, nil
+	case "vllm":
+		embedder, err := embeddings.NewVLLMEmbedder(
+			cfg.VLLMBaseURL,
+			cfg.VLLMModel,
+			cfg.VLLMAPIKey,
+			time.Duration(cfg.VectorQueryTimeoutMS)*time.Millisecond,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("initialize vllm embedder: %w", err)
+		}
+		return embedder, nil
 	default:
 		return nil, fmt.Errorf(
-			"unsupported embedding provider %q (set EMBEDDING_PROVIDER=ollama)",
+			"unsupported embedding provider %q (set EMBEDDING_PROVIDER to one of: ollama, vllm)",
 			cfg.EmbeddingProvider,
 		)
 	}

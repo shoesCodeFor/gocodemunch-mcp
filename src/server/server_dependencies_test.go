@@ -80,9 +80,24 @@ func TestBuildVectorBackendBuildsQdrantAdapter(t *testing.T) {
 	}
 }
 
+func TestBuildEmbedderBuildsVLLMProvider(t *testing.T) {
+	embedder, err := buildEmbedder(config.Config{
+		EmbeddingProvider:    "vllm",
+		VLLMBaseURL:          "http://localhost:8000/v1",
+		VLLMModel:            "bge-m3",
+		VectorQueryTimeoutMS: 8000,
+	})
+	if err != nil {
+		t.Fatalf("build vllm embedder: %v", err)
+	}
+	if embedder == nil {
+		t.Fatal("expected non-nil vllm embedder")
+	}
+}
+
 func TestBuildEmbedderRejectsUnsupportedProvider(t *testing.T) {
 	_, err := buildEmbedder(config.Config{
-		EmbeddingProvider:    "vllm",
+		EmbeddingProvider:    "openai",
 		EmbeddingModel:       "bge-m3",
 		OllamaBaseURL:        "http://localhost:11434",
 		VectorQueryTimeoutMS: 8000,
