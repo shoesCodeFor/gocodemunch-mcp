@@ -54,6 +54,8 @@ Compiled binaries are written to `./bin`:
 
 All three eval make targets are non-interactive and pass `--skip-markdown-report` by default. Override defaults with make variables like `EVAL_FIXTURES_DIR`, `EVAL_NAMESPACE_PREFIX`, `EVAL_SMOKE_PROVIDERS`, `EVAL_MATRIX_BACKENDS`, and `EVAL_GATE_MIN_MEAN_RECALL_AT_K`.
 
+Deterministic local baseline thresholds are persisted in `docs/evals/thresholds.stub` with accompanying run evidence in `docs/evals/Eval-Threshold-Baseline.md`.
+
 ## Main server binary
 
 Build and run the MCP server locally:

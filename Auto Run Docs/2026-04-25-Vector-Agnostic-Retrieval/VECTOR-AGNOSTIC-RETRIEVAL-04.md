@@ -32,4 +32,7 @@ Goal: add a repeatable, non-interactive evaluation harness with quality/performa
   - Completed: Added `TestRunWithArgsIntegrationReportOutputDeterminism` in `src/cmd/gocodemunch-eval/main_test.go` to run the eval runner twice with fixed UTC time and assert deterministic normalized JSON report content, deterministic markdown report filename reuse, and stable/deduplicated `docs/evals/Eval-Index.md` run links.
   - Completed: Added integration test helpers in `src/cmd/gocodemunch-eval/main_test.go` (`setEvalRunnerIntegrationEnv`, `newOllamaEvalStubServer`, `evalFixtureEmbedding`, `normalizeEvalReportForDeterministicComparison`) to keep tests deterministic and non-interactive.
   - Completed: Ran targeted eval suites with `go test ./src/internal/evals ./src/cmd/gocodemunch-eval -count=1`.
-- [ ] Run `make eval-smoke` and `make eval-matrix` twice, verify stable baselines, and persist initial thresholds in the repo.
+- [x] Run `make eval-smoke` and `make eval-matrix` twice, verify stable baselines, and persist initial thresholds in the repo.
+  - Completed: Ran `make eval-smoke` twice and `make eval-matrix` twice (with deterministic local Ollama/vLLM-compatible embedding stub + local Qdrant) and captured outputs under `Auto Run Docs/Working/evals/baseline-runs/`.
+  - Completed: Verified stable quality baselines across repeated runs by diffing normalized quality summaries (`mean_recall_at_k`, `mean_mrr_at_k`) for smoke and matrix outputs; both diffs were empty.
+  - Completed: Persisted initial thresholds in-repo at `docs/evals/thresholds.stub` and documented run evidence plus threshold rationale in `docs/evals/Eval-Threshold-Baseline.md`.

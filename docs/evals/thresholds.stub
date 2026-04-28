@@ -1,0 +1,6 @@
+# Deterministic local baseline thresholds captured on 2026-04-28.
+# Source: docs/evals/Eval-Threshold-Baseline.md
+EVAL_GATE_MIN_MEAN_RECALL_AT_K=0.75
+EVAL_GATE_MIN_MEAN_MRR_AT_K=1.00
+EVAL_GATE_MAX_P50_LATENCY_MS=2.00
+EVAL_GATE_MAX_P95_LATENCY_MS=5.00
