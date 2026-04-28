@@ -171,13 +171,9 @@ func runWithArgs(args []string) int {
 		return 1
 	}
 
-	embedder, err := embeddings.NewOllamaEmbedder(
-		cfg.OllamaBaseURL,
-		cfg.EmbeddingModel,
-		time.Duration(cfg.VectorQueryTimeoutMS)*time.Millisecond,
-	)
+	embedder, err := newEmbedder(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "initialize ollama embedder: %v\n", err)
+		fmt.Fprintf(os.Stderr, "initialize embedder: %v\n", err)
 		return 1
 	}
 
@@ -185,7 +181,7 @@ func runWithArgs(args []string) int {
 	fixtureEmbeddings, err := embedder.Embed(ctx, corpusTexts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "embed fixture corpus: %v\n", err)
-		printOllamaHint(cfg)
+		printProviderHint(cfg)
 		return 1
 	}
 
@@ -207,7 +203,7 @@ func runWithArgs(args []string) int {
 	queryEmbeddings, err := embedder.Embed(ctx, []string{query})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "embed query: %v\n", err)
-		printOllamaHint(cfg)
+		printProviderHint(cfg)
 		return 1
 	}
 	if len(queryEmbeddings) != 1 {
@@ -229,6 +225,23 @@ func runWithArgs(args []string) int {
 	printMatches(queryResponse.Matches)
 
 	return 0
+}
+
+func normalizeEmbeddingProvider(rawProvider string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(rawProvider))
+	if normalized == "" {
+		normalized = "ollama"
+	}
+
+	switch normalized {
+	case "ollama", "vllm":
+		return normalized, nil
+	default:
+		return "", fmt.Errorf(
+			"unsupported embedding provider %q (set EMBEDDING_PROVIDER to one of: ollama, vllm)",
+			rawProvider,
+		)
+	}
 }
 
 func normalizeBackend(rawBackend string) (string, error) {
@@ -271,6 +284,47 @@ func newVectorBackend(
 		return adapter, nil
 	default:
 		return nil, fmt.Errorf("unsupported backend %q", backend)
+	}
+}
+
+func newEmbedder(cfg config.Config) (indexing.Embedder, error) {
+	provider, err := normalizeEmbeddingProvider(cfg.EmbeddingProvider)
+	if err != nil {
+		return nil, err
+	}
+
+	if cfg.VectorQueryTimeoutMS < 0 {
+		return nil, fmt.Errorf(
+			"vector query timeout must be non-negative (got %dms)",
+			cfg.VectorQueryTimeoutMS,
+		)
+	}
+	timeout := time.Duration(cfg.VectorQueryTimeoutMS) * time.Millisecond
+
+	switch provider {
+	case "ollama":
+		embedder, buildErr := embeddings.NewOllamaEmbedder(
+			cfg.OllamaBaseURL,
+			cfg.EmbeddingModel,
+			timeout,
+		)
+		if buildErr != nil {
+			return nil, fmt.Errorf("initialize ollama embedder: %w", buildErr)
+		}
+		return embedder, nil
+	case "vllm":
+		embedder, buildErr := embeddings.NewVLLMEmbedder(
+			cfg.VLLMBaseURL,
+			cfg.VLLMModel,
+			cfg.VLLMAPIKey,
+			timeout,
+		)
+		if buildErr != nil {
+			return nil, fmt.Errorf("initialize vllm embedder: %w", buildErr)
+		}
+		return embedder, nil
+	default:
+		return nil, fmt.Errorf("unsupported embedding provider %q", provider)
 	}
 }
 
@@ -397,14 +451,42 @@ func cloneEmbedding(embedding []float32) []float32 {
 	return clone
 }
 
-func printOllamaHint(cfg config.Config) {
-	fmt.Fprintf(
-		os.Stderr,
-		"hint: ensure Ollama is reachable at %q and model %q is available (for example: ollama pull %s)\n",
-		cfg.OllamaBaseURL,
-		cfg.EmbeddingModel,
-		cfg.EmbeddingModel,
-	)
+func configuredEmbeddingModel(cfg config.Config) string {
+	provider, err := normalizeEmbeddingProvider(cfg.EmbeddingProvider)
+	if err != nil {
+		return strings.TrimSpace(cfg.EmbeddingModel)
+	}
+	if provider == "vllm" {
+		return strings.TrimSpace(cfg.VLLMModel)
+	}
+	return strings.TrimSpace(cfg.EmbeddingModel)
+}
+
+func printProviderHint(cfg config.Config) {
+	provider, err := normalizeEmbeddingProvider(cfg.EmbeddingProvider)
+	if err != nil {
+		provider = "ollama"
+	}
+
+	switch provider {
+	case "vllm":
+		model := configuredEmbeddingModel(cfg)
+		fmt.Fprintf(
+			os.Stderr,
+			"hint: ensure vLLM is reachable at %q and model %q is available\n",
+			cfg.VLLMBaseURL,
+			model,
+		)
+	default:
+		model := configuredEmbeddingModel(cfg)
+		fmt.Fprintf(
+			os.Stderr,
+			"hint: ensure Ollama is reachable at %q and model %q is available (for example: ollama pull %s)\n",
+			cfg.OllamaBaseURL,
+			model,
+			model,
+		)
+	}
 }
 
 func printSmokeSummary(
@@ -415,11 +497,21 @@ func printSmokeSummary(
 	topK int,
 	matchCount int,
 ) {
+	provider, err := normalizeEmbeddingProvider(cfg.EmbeddingProvider)
+	if err != nil {
+		provider = strings.ToLower(strings.TrimSpace(cfg.EmbeddingProvider))
+	}
+
 	fmt.Println("Vector smoke run")
 	fmt.Printf("- backend: %s\n", strings.ToLower(strings.TrimSpace(cfg.VectorBackend)))
-	fmt.Printf("- embedding provider: %s\n", strings.ToLower(strings.TrimSpace(cfg.EmbeddingProvider)))
-	fmt.Printf("- embedding model: %s\n", cfg.EmbeddingModel)
-	fmt.Printf("- ollama base url: %s\n", cfg.OllamaBaseURL)
+	fmt.Printf("- embedding provider: %s\n", provider)
+	fmt.Printf("- embedding model: %s\n", configuredEmbeddingModel(cfg))
+	switch provider {
+	case "vllm":
+		fmt.Printf("- vllm base url: %s\n", cfg.VLLMBaseURL)
+	default:
+		fmt.Printf("- ollama base url: %s\n", cfg.OllamaBaseURL)
+	}
 	switch strings.ToLower(strings.TrimSpace(cfg.VectorBackend)) {
 	case "qdrant":
 		fmt.Printf("- qdrant url: %s\n", cfg.QdrantURL)
