@@ -8,9 +8,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,8 +25,20 @@ import (
 )
 
 const (
-	defaultFixturesDir     = "tests-go/evals/fixtures"
-	defaultNamespacePrefix = "eval-fixtures"
+	defaultFixturesDir      = "tests-go/evals/fixtures"
+	defaultNamespacePrefix  = "eval-fixtures"
+	evalGateFailureExitCode = 3
+)
+
+const (
+	envEvalMinMeanRecallAtKPrimary = "GOCODEMUNCH_EVAL_MIN_MEAN_RECALL_AT_K"
+	envEvalMinMeanRecallAtKCompat  = "EVAL_MIN_MEAN_RECALL_AT_K"
+	envEvalMinMeanMRRAtKPrimary    = "GOCODEMUNCH_EVAL_MIN_MEAN_MRR_AT_K"
+	envEvalMinMeanMRRAtKCompat     = "EVAL_MIN_MEAN_MRR_AT_K"
+	envEvalMaxP50LatencyMSPrimary  = "GOCODEMUNCH_EVAL_MAX_P50_LATENCY_MS"
+	envEvalMaxP50LatencyMSCompat   = "EVAL_MAX_P50_LATENCY_MS"
+	envEvalMaxP95LatencyMSPrimary  = "GOCODEMUNCH_EVAL_MAX_P95_LATENCY_MS"
+	envEvalMaxP95LatencyMSCompat   = "EVAL_MAX_P95_LATENCY_MS"
 )
 
 type fixtureCorpus struct {
@@ -77,6 +91,9 @@ type evalRunReport struct {
 	GeneratedAtUTC string                  `json:"generated_at_utc"`
 	Dataset        string                  `json:"dataset"`
 	FixturesDir    string                  `json:"fixtures_dir"`
+	Thresholds     evalThresholdReport     `json:"thresholds"`
+	GatePassed     bool                    `json:"gate_passed"`
+	GateFailures   []evalGateFailureReport `json:"gate_failures,omitempty"`
 	Combinations   []evalCombinationReport `json:"combinations"`
 }
 
@@ -88,6 +105,7 @@ type evalCombinationReport struct {
 	IndexedDocs int                  `json:"indexed_docs"`
 	PerQuery    []evalPerQueryReport `json:"per_query"`
 	Aggregate   evalAggregateReport  `json:"aggregate"`
+	Gate        evalGateReport       `json:"gate"`
 }
 
 type evalPerQueryReport struct {
@@ -114,6 +132,39 @@ type evalAggregateReport struct {
 	MeanRecallAtK  float64                  `json:"mean_recall_at_k"`
 	MeanMRRAtK     float64                  `json:"mean_mrr_at_k"`
 	LatencyMetrics evals.LatencyPercentiles `json:"latency_metrics"`
+}
+
+type evalThresholdConfig struct {
+	MinMeanRecallAtK *float64
+	MinMeanMRRAtK    *float64
+	MaxP50LatencyMS  *float64
+	MaxP95LatencyMS  *float64
+}
+
+type evalThresholdReport struct {
+	MinMeanRecallAtK *float64 `json:"min_mean_recall_at_k,omitempty"`
+	MinMeanMRRAtK    *float64 `json:"min_mean_mrr_at_k,omitempty"`
+	MaxP50LatencyMS  *float64 `json:"max_p50_latency_ms,omitempty"`
+	MaxP95LatencyMS  *float64 `json:"max_p95_latency_ms,omitempty"`
+}
+
+type evalGateCheckReport struct {
+	Metric     string  `json:"metric"`
+	Comparator string  `json:"comparator"`
+	Actual     float64 `json:"actual"`
+	Target     float64 `json:"target"`
+	Message    string  `json:"message"`
+}
+
+type evalGateReport struct {
+	Passed       bool                  `json:"passed"`
+	FailedChecks []evalGateCheckReport `json:"failed_checks,omitempty"`
+}
+
+type evalGateFailureReport struct {
+	Provider string              `json:"provider"`
+	Backend  string              `json:"backend"`
+	Check    evalGateCheckReport `json:"check"`
 }
 
 var (
@@ -144,6 +195,26 @@ func runWithArgs(args []string, stdout, stderr io.Writer) int {
 	namespacePrefixArg := flags.String("namespace-prefix", defaultNamespacePrefix, "Namespace prefix used for eval fixtures")
 	keepDataArg := flags.Bool("keep-data", false, "Keep temporary sqlite data directories when CODE_INDEX_PATH is not set")
 	outPathArg := flags.String("out", "", "Optional output file path for JSON report")
+	minMeanRecallArg := flags.Float64(
+		"min-mean-recall-at-k",
+		math.NaN(),
+		"Minimum required aggregate mean recall@k (0..1); overrides env if set",
+	)
+	minMeanMRRArg := flags.Float64(
+		"min-mean-mrr-at-k",
+		math.NaN(),
+		"Minimum required aggregate mean mrr@k (0..1); overrides env if set",
+	)
+	maxP50LatencyArg := flags.Float64(
+		"max-p50-latency-ms",
+		math.NaN(),
+		"Maximum allowed aggregate latency p50 in milliseconds (>=0); overrides env if set",
+	)
+	maxP95LatencyArg := flags.Float64(
+		"max-p95-latency-ms",
+		math.NaN(),
+		"Maximum allowed aggregate latency p95 in milliseconds (>=0); overrides env if set",
+	)
 
 	if err := flags.Parse(args); err != nil {
 		return 2
@@ -173,10 +244,23 @@ func runWithArgs(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	thresholds, err := resolveEvalThresholdConfig(
+		*minMeanRecallArg,
+		*minMeanMRRArg,
+		*maxP50LatencyArg,
+		*maxP95LatencyArg,
+	)
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve eval thresholds: %v\n", err)
+		return 2
+	}
+
 	report := evalRunReport{
 		GeneratedAtUTC: nowUTCFn().Format(time.RFC3339),
 		Dataset:        fixtures.Dataset,
 		FixturesDir:    fixturesDir,
+		Thresholds:     thresholds.toReport(),
+		GatePassed:     true,
 		Combinations:   make([]evalCombinationReport, 0, len(combinations)),
 	}
 
@@ -196,6 +280,18 @@ func runWithArgs(args []string, stdout, stderr io.Writer) int {
 		if runErr != nil {
 			fmt.Fprintf(stderr, "run combo provider=%s backend=%s: %v\n", combo.Provider, combo.Backend, runErr)
 			return 1
+		}
+
+		result.Gate = evaluateGate(result.Aggregate, thresholds)
+		if !result.Gate.Passed {
+			report.GatePassed = false
+			for _, failed := range result.Gate.FailedChecks {
+				report.GateFailures = append(report.GateFailures, evalGateFailureReport{
+					Provider: result.Provider,
+					Backend:  result.Backend,
+					Check:    failed,
+				})
+			}
 		}
 		report.Combinations = append(report.Combinations, result)
 	}
@@ -218,7 +314,213 @@ func runWithArgs(args []string, stdout, stderr io.Writer) int {
 	}
 
 	_, _ = fmt.Fprintln(stdout, string(payload))
+	if !report.GatePassed {
+		fmt.Fprintln(stderr, "eval gate failed: one or more thresholds were not met")
+		return evalGateFailureExitCode
+	}
 	return 0
+}
+
+func resolveEvalThresholdConfig(
+	minMeanRecallAtKFlag float64,
+	minMeanMRRAtKFlag float64,
+	maxP50LatencyMSFlag float64,
+	maxP95LatencyMSFlag float64,
+) (evalThresholdConfig, error) {
+	minMeanRecallAtK, err := resolveThresholdValue(
+		minMeanRecallAtKFlag,
+		[]string{envEvalMinMeanRecallAtKPrimary, envEvalMinMeanRecallAtKCompat},
+		func(value float64) error {
+			if value < 0 || value > 1 {
+				return fmt.Errorf("must be within [0,1], got %v", value)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return evalThresholdConfig{}, fmt.Errorf("min mean recall@k: %w", err)
+	}
+
+	minMeanMRRAtK, err := resolveThresholdValue(
+		minMeanMRRAtKFlag,
+		[]string{envEvalMinMeanMRRAtKPrimary, envEvalMinMeanMRRAtKCompat},
+		func(value float64) error {
+			if value < 0 || value > 1 {
+				return fmt.Errorf("must be within [0,1], got %v", value)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return evalThresholdConfig{}, fmt.Errorf("min mean mrr@k: %w", err)
+	}
+
+	maxP50LatencyMS, err := resolveThresholdValue(
+		maxP50LatencyMSFlag,
+		[]string{envEvalMaxP50LatencyMSPrimary, envEvalMaxP50LatencyMSCompat},
+		func(value float64) error {
+			if value < 0 {
+				return fmt.Errorf("must be >= 0, got %v", value)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return evalThresholdConfig{}, fmt.Errorf("max p50 latency ms: %w", err)
+	}
+
+	maxP95LatencyMS, err := resolveThresholdValue(
+		maxP95LatencyMSFlag,
+		[]string{envEvalMaxP95LatencyMSPrimary, envEvalMaxP95LatencyMSCompat},
+		func(value float64) error {
+			if value < 0 {
+				return fmt.Errorf("must be >= 0, got %v", value)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return evalThresholdConfig{}, fmt.Errorf("max p95 latency ms: %w", err)
+	}
+
+	return evalThresholdConfig{
+		MinMeanRecallAtK: minMeanRecallAtK,
+		MinMeanMRRAtK:    minMeanMRRAtK,
+		MaxP50LatencyMS:  maxP50LatencyMS,
+		MaxP95LatencyMS:  maxP95LatencyMS,
+	}, nil
+}
+
+func resolveThresholdValue(
+	flagValue float64,
+	envKeys []string,
+	validate func(float64) error,
+) (*float64, error) {
+	value, set, err := resolveThresholdRaw(flagValue, envKeys)
+	if err != nil {
+		return nil, err
+	}
+	if !set {
+		return nil, nil
+	}
+	if validate != nil {
+		if err := validate(value); err != nil {
+			return nil, err
+		}
+	}
+	return float64Ptr(value), nil
+}
+
+func resolveThresholdRaw(flagValue float64, envKeys []string) (float64, bool, error) {
+	if !math.IsNaN(flagValue) {
+		return flagValue, true, nil
+	}
+	value, source, ok := firstEnvValue(envKeys...)
+	if !ok {
+		return 0, false, nil
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0, false, fmt.Errorf("invalid %s value %q: %w", source, value, err)
+	}
+	return parsed, true, nil
+}
+
+func firstEnvValue(keys ...string) (value string, source string, ok bool) {
+	for _, key := range keys {
+		trimmed := strings.TrimSpace(os.Getenv(key))
+		if trimmed == "" {
+			continue
+		}
+		return trimmed, key, true
+	}
+	return "", "", false
+}
+
+func evaluateGate(aggregate evalAggregateReport, thresholds evalThresholdConfig) evalGateReport {
+	failures := make([]evalGateCheckReport, 0, 4)
+
+	if thresholds.MinMeanRecallAtK != nil && aggregate.MeanRecallAtK < *thresholds.MinMeanRecallAtK {
+		failures = append(failures, evalGateCheckReport{
+			Metric:     "mean_recall_at_k",
+			Comparator: ">=",
+			Actual:     aggregate.MeanRecallAtK,
+			Target:     *thresholds.MinMeanRecallAtK,
+			Message: fmt.Sprintf(
+				"mean_recall_at_k %.6f is below required threshold %.6f",
+				aggregate.MeanRecallAtK,
+				*thresholds.MinMeanRecallAtK,
+			),
+		})
+	}
+
+	if thresholds.MinMeanMRRAtK != nil && aggregate.MeanMRRAtK < *thresholds.MinMeanMRRAtK {
+		failures = append(failures, evalGateCheckReport{
+			Metric:     "mean_mrr_at_k",
+			Comparator: ">=",
+			Actual:     aggregate.MeanMRRAtK,
+			Target:     *thresholds.MinMeanMRRAtK,
+			Message: fmt.Sprintf(
+				"mean_mrr_at_k %.6f is below required threshold %.6f",
+				aggregate.MeanMRRAtK,
+				*thresholds.MinMeanMRRAtK,
+			),
+		})
+	}
+
+	if thresholds.MaxP50LatencyMS != nil && aggregate.LatencyMetrics.P50MS > *thresholds.MaxP50LatencyMS {
+		failures = append(failures, evalGateCheckReport{
+			Metric:     "latency_metrics.p50_ms",
+			Comparator: "<=",
+			Actual:     aggregate.LatencyMetrics.P50MS,
+			Target:     *thresholds.MaxP50LatencyMS,
+			Message: fmt.Sprintf(
+				"latency_metrics.p50_ms %.6f exceeds allowed threshold %.6f",
+				aggregate.LatencyMetrics.P50MS,
+				*thresholds.MaxP50LatencyMS,
+			),
+		})
+	}
+
+	if thresholds.MaxP95LatencyMS != nil && aggregate.LatencyMetrics.P95MS > *thresholds.MaxP95LatencyMS {
+		failures = append(failures, evalGateCheckReport{
+			Metric:     "latency_metrics.p95_ms",
+			Comparator: "<=",
+			Actual:     aggregate.LatencyMetrics.P95MS,
+			Target:     *thresholds.MaxP95LatencyMS,
+			Message: fmt.Sprintf(
+				"latency_metrics.p95_ms %.6f exceeds allowed threshold %.6f",
+				aggregate.LatencyMetrics.P95MS,
+				*thresholds.MaxP95LatencyMS,
+			),
+		})
+	}
+
+	return evalGateReport{
+		Passed:       len(failures) == 0,
+		FailedChecks: failures,
+	}
+}
+
+func (cfg evalThresholdConfig) toReport() evalThresholdReport {
+	return evalThresholdReport{
+		MinMeanRecallAtK: cloneFloat64Ptr(cfg.MinMeanRecallAtK),
+		MinMeanMRRAtK:    cloneFloat64Ptr(cfg.MinMeanMRRAtK),
+		MaxP50LatencyMS:  cloneFloat64Ptr(cfg.MaxP50LatencyMS),
+		MaxP95LatencyMS:  cloneFloat64Ptr(cfg.MaxP95LatencyMS),
+	}
+}
+
+func float64Ptr(value float64) *float64 {
+	v := value
+	return &v
+}
+
+func cloneFloat64Ptr(value *float64) *float64 {
+	if value == nil {
+		return nil
+	}
+	return float64Ptr(*value)
 }
 
 func runCombination(

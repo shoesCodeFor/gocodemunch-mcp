@@ -79,6 +79,12 @@ func TestRunWithArgsEmitsPerQueryAndAggregateMetrics(t *testing.T) {
 	if report.Dataset != "eval-fixtures-test" {
 		t.Fatalf("unexpected dataset: %#v", report)
 	}
+	if !report.GatePassed {
+		t.Fatalf("expected gate_passed=true without configured thresholds, got %#v", report)
+	}
+	if len(report.GateFailures) != 0 {
+		t.Fatalf("expected no gate failures without configured thresholds, got %#v", report.GateFailures)
+	}
 	if len(report.Combinations) != 1 {
 		t.Fatalf("expected one combination report, got %#v", report.Combinations)
 	}
@@ -128,6 +134,9 @@ func TestRunWithArgsEmitsPerQueryAndAggregateMetrics(t *testing.T) {
 	}
 	if combo.Aggregate.LatencyMetrics.P50MS < 0 || combo.Aggregate.LatencyMetrics.P95MS < 0 {
 		t.Fatalf("latency percentiles must be non-negative: %#v", combo.Aggregate.LatencyMetrics)
+	}
+	if !combo.Gate.Passed || len(combo.Gate.FailedChecks) != 0 {
+		t.Fatalf("expected combo gate to pass without thresholds, got %#v", combo.Gate)
 	}
 }
 
@@ -196,6 +205,222 @@ func TestRunWithArgsRejectsDatasetMismatch(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "fixture dataset mismatch") {
 		t.Fatalf("expected fixture dataset mismatch error, stderr=%s", stderr.String())
+	}
+}
+
+func TestRunWithArgsThresholdGateFailsWhenQualityMissed(t *testing.T) {
+	fixturesDir := writeEvalFixtures(t, fixtureCorpus{
+		Dataset: "eval-fixtures-test",
+		Documents: []fixtureDocument{
+			{ID: "doc-a", Path: "fixtures/a.go", Language: "go", Text: "json decode"},
+			{ID: "doc-b", Path: "fixtures/b.go", Language: "go", Text: "http timeout"},
+			{ID: "doc-c", Path: "fixtures/c.go", Language: "go", Text: "context cancel"},
+		},
+	}, fixtureQueries{
+		Dataset: "eval-fixtures-test",
+		Queries: []fixtureRow{
+			{ID: "q-1", Query: "decode json", TopK: 2},
+			{ID: "q-2", Query: "cancel context", TopK: 2},
+		},
+	}, fixtureRelevance{
+		Dataset: "eval-fixtures-test",
+		Judgments: []fixtureJudgment{
+			{QueryID: "q-1", DocID: "doc-a", Relevance: 3},
+			{QueryID: "q-1", DocID: "doc-b", Relevance: 1},
+			{QueryID: "q-2", DocID: "doc-c", Relevance: 3},
+		},
+	})
+
+	backend := &scriptedVectorBackend{queryPlans: [][]string{
+		{"doc-c", "doc-b"},
+		{"doc-a", "doc-b"},
+	}}
+
+	restore := overrideEvalRunnerHooks(
+		func() (config.Config, error) {
+			return config.Config{
+				EmbeddingProvider:    "ollama",
+				VectorBackend:        "sqlite",
+				EmbeddingModel:       "eval-test-model",
+				VectorQueryTimeoutMS: 500,
+			}, nil
+		},
+		func(config.Config, string) (indexing.VectorBackend, error) {
+			return backend, nil
+		},
+		func(config.Config, string) (indexing.Embedder, error) {
+			return staticEmbedder{}, nil
+		},
+		func(indexing.VectorBackend) error { return nil },
+		func() time.Time { return time.Date(2026, time.April, 28, 10, 0, 0, 0, time.UTC) },
+	)
+	defer restore()
+
+	t.Setenv("GOCODEMUNCH_EVAL_MIN_MEAN_RECALL_AT_K", "0.90")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runWithArgs([]string{"--fixtures-dir", fixturesDir}, &stdout, &stderr)
+	if code != evalGateFailureExitCode {
+		t.Fatalf("expected gate failure exit code %d, got %d stderr=%s", evalGateFailureExitCode, code, stderr.String())
+	}
+
+	report := evalRunReport{}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("decode report json: %v output=%s", err, stdout.String())
+	}
+
+	if report.GatePassed {
+		t.Fatalf("expected gate_passed=false when threshold misses, got %#v", report)
+	}
+	if len(report.GateFailures) == 0 {
+		t.Fatalf("expected at least one gate failure, got %#v", report)
+	}
+
+	combo := report.Combinations[0]
+	if combo.Gate.Passed {
+		t.Fatalf("expected combination gate failure, got %#v", combo.Gate)
+	}
+	if len(combo.Gate.FailedChecks) == 0 {
+		t.Fatalf("expected combination gate failure checks, got %#v", combo.Gate)
+	}
+	if combo.Gate.FailedChecks[0].Metric != "mean_recall_at_k" {
+		t.Fatalf("expected first failed metric mean_recall_at_k, got %#v", combo.Gate.FailedChecks)
+	}
+	if !strings.Contains(stderr.String(), "eval gate failed") {
+		t.Fatalf("expected gate failure summary on stderr, got %s", stderr.String())
+	}
+}
+
+func TestRunWithArgsThresholdGatePassesWithFlags(t *testing.T) {
+	fixturesDir := writeEvalFixtures(t, fixtureCorpus{
+		Dataset: "eval-fixtures-test",
+		Documents: []fixtureDocument{
+			{ID: "doc-a", Path: "fixtures/a.go", Language: "go", Text: "json decode"},
+			{ID: "doc-b", Path: "fixtures/b.go", Language: "go", Text: "http timeout"},
+			{ID: "doc-c", Path: "fixtures/c.go", Language: "go", Text: "context cancel"},
+		},
+	}, fixtureQueries{
+		Dataset: "eval-fixtures-test",
+		Queries: []fixtureRow{
+			{ID: "q-1", Query: "decode json", TopK: 2},
+			{ID: "q-2", Query: "cancel context", TopK: 2},
+		},
+	}, fixtureRelevance{
+		Dataset: "eval-fixtures-test",
+		Judgments: []fixtureJudgment{
+			{QueryID: "q-1", DocID: "doc-a", Relevance: 3},
+			{QueryID: "q-1", DocID: "doc-b", Relevance: 1},
+			{QueryID: "q-2", DocID: "doc-c", Relevance: 3},
+		},
+	})
+
+	backend := &scriptedVectorBackend{queryPlans: [][]string{
+		{"doc-b", "doc-c"},
+		{"doc-a", "doc-c"},
+	}}
+
+	restore := overrideEvalRunnerHooks(
+		func() (config.Config, error) {
+			return config.Config{
+				EmbeddingProvider:    "ollama",
+				VectorBackend:        "sqlite",
+				EmbeddingModel:       "eval-test-model",
+				VectorQueryTimeoutMS: 500,
+			}, nil
+		},
+		func(config.Config, string) (indexing.VectorBackend, error) {
+			return backend, nil
+		},
+		func(config.Config, string) (indexing.Embedder, error) {
+			return staticEmbedder{}, nil
+		},
+		func(indexing.VectorBackend) error { return nil },
+		func() time.Time { return time.Date(2026, time.April, 28, 10, 0, 0, 0, time.UTC) },
+	)
+	defer restore()
+
+	args := []string{
+		"--fixtures-dir", fixturesDir,
+		"--min-mean-recall-at-k", "0.70",
+		"--min-mean-mrr-at-k", "0.70",
+		"--max-p50-latency-ms", "5000",
+		"--max-p95-latency-ms", "5000",
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runWithArgs(args, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected success exit code 0, got %d stderr=%s", code, stderr.String())
+	}
+
+	report := evalRunReport{}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("decode report json: %v output=%s", err, stdout.String())
+	}
+	if !report.GatePassed {
+		t.Fatalf("expected gate_passed=true, got %#v", report)
+	}
+	if report.Thresholds.MinMeanRecallAtK == nil || *report.Thresholds.MinMeanRecallAtK != 0.7 {
+		t.Fatalf("expected min_mean_recall_at_k threshold=0.7, got %#v", report.Thresholds)
+	}
+	if report.Thresholds.MinMeanMRRAtK == nil || *report.Thresholds.MinMeanMRRAtK != 0.7 {
+		t.Fatalf("expected min_mean_mrr_at_k threshold=0.7, got %#v", report.Thresholds)
+	}
+	if report.Thresholds.MaxP50LatencyMS == nil || *report.Thresholds.MaxP50LatencyMS != 5000 {
+		t.Fatalf("expected max_p50_latency_ms threshold=5000, got %#v", report.Thresholds)
+	}
+	if report.Thresholds.MaxP95LatencyMS == nil || *report.Thresholds.MaxP95LatencyMS != 5000 {
+		t.Fatalf("expected max_p95_latency_ms threshold=5000, got %#v", report.Thresholds)
+	}
+
+	combo := report.Combinations[0]
+	if !combo.Gate.Passed || len(combo.Gate.FailedChecks) != 0 {
+		t.Fatalf("expected combination gate pass, got %#v", combo.Gate)
+	}
+}
+
+func TestRunWithArgsRejectsInvalidThreshold(t *testing.T) {
+	fixturesDir := writeEvalFixtures(t, fixtureCorpus{
+		Dataset:   "eval-fixtures-test",
+		Documents: []fixtureDocument{{ID: "doc-a", Path: "fixtures/a.go", Language: "go", Text: "json decode"}},
+	}, fixtureQueries{
+		Dataset: "eval-fixtures-test",
+		Queries: []fixtureRow{{ID: "q-1", Query: "decode json", TopK: 1}},
+	}, fixtureRelevance{
+		Dataset:   "eval-fixtures-test",
+		Judgments: []fixtureJudgment{{QueryID: "q-1", DocID: "doc-a", Relevance: 3}},
+	})
+
+	restore := overrideEvalRunnerHooks(
+		func() (config.Config, error) {
+			return config.Config{EmbeddingProvider: "ollama", VectorBackend: "sqlite"}, nil
+		},
+		createBackendFn,
+		createEmbedderFn,
+		closeBackendFn,
+		nowUTCFn,
+	)
+	defer restore()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runWithArgs(
+		[]string{
+			"--fixtures-dir", fixturesDir,
+			"--min-mean-recall-at-k", "1.2",
+		},
+		&stdout,
+		&stderr,
+	)
+	if code != 2 {
+		t.Fatalf("expected invalid-input exit code 2, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "resolve eval thresholds") {
+		t.Fatalf("expected threshold resolution error prefix, stderr=%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "must be within [0,1]") {
+		t.Fatalf("expected threshold validation error, stderr=%s", stderr.String())
 	}
 }
 
