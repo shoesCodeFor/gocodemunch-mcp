@@ -85,6 +85,51 @@ func TestConfiguredLanguagesFilterEnumAndDisableSearchColumns(t *testing.T) {
 	}
 }
 
+func TestSearchTextContractExposesRetrievalModesAndHybridWeightOverrides(t *testing.T) {
+	svc := New(config.Config{Disabled: map[string]struct{}{}}, Dependencies{})
+	tools := svc.ListTools()
+
+	searchText, ok := toolByName(tools, "search_text")
+	if !ok {
+		t.Fatalf("search_text tool missing from registry")
+	}
+
+	retrievalModeSchema := propertySchemaFor(t, searchText, "retrieval_mode")
+	expectedModes := []string{"lexical", "semantic", "hybrid"}
+	if gotModes := enumStringsForProperty(t, searchText, "retrieval_mode"); !reflect.DeepEqual(gotModes, expectedModes) {
+		t.Fatalf("unexpected retrieval_mode enum: got=%#v expected=%#v", gotModes, expectedModes)
+	}
+	if gotDefault, ok := retrievalModeSchema["default"].(string); !ok || gotDefault != "lexical" {
+		t.Fatalf("expected retrieval_mode default lexical, got %#v", retrievalModeSchema["default"])
+	}
+
+	lexicalWeightSchema := propertySchemaFor(t, searchText, "lexical_weight")
+	if gotType, _ := lexicalWeightSchema["type"].(string); gotType != "number" {
+		t.Fatalf("expected lexical_weight type number, got %#v", lexicalWeightSchema)
+	}
+
+	semanticWeightSchema := propertySchemaFor(t, searchText, "semantic_weight")
+	if gotType, _ := semanticWeightSchema["type"].(string); gotType != "number" {
+		t.Fatalf("expected semantic_weight type number, got %#v", semanticWeightSchema)
+	}
+}
+
+func TestSearchTextContractRequiredFieldsRemainStable(t *testing.T) {
+	svc := New(config.Config{Disabled: map[string]struct{}{}}, Dependencies{})
+	tools := svc.ListTools()
+
+	searchText, ok := toolByName(tools, "search_text")
+	if !ok {
+		t.Fatalf("search_text tool missing from registry")
+	}
+
+	required := schemaStrings(searchText.InputSchema, "required")
+	expected := []string{"repo", "query"}
+	if !reflect.DeepEqual(required, expected) {
+		t.Fatalf("unexpected required fields for search_text: got=%#v expected=%#v", required, expected)
+	}
+}
+
 func toolByName(tools []Tool, name string) (Tool, bool) {
 	for _, tool := range tools {
 		if tool.Name == name {
@@ -119,4 +164,18 @@ func enumStringsForProperty(t *testing.T, tool Tool, property string) []string {
 		out = append(out, text)
 	}
 	return out
+}
+
+func propertySchemaFor(t *testing.T, tool Tool, property string) map[string]any {
+	t.Helper()
+
+	propertiesRaw, ok := tool.InputSchema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("tool %s missing properties schema", tool.Name)
+	}
+	propertyRaw, ok := propertiesRaw[property].(map[string]any)
+	if !ok {
+		t.Fatalf("tool %s missing %s property schema", tool.Name, property)
+	}
+	return propertyRaw
 }

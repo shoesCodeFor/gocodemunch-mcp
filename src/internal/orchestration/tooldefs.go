@@ -142,12 +142,15 @@ func ToolDefinitionsForLanguages(configuredLanguages []string) []Tool {
 			Name:        "search_text",
 			Description: "Search file contents with optional regex.",
 			InputSchema: objectSchema(map[string]any{
-				"repo":          stringProp("Repository identifier"),
-				"query":         stringProp("Query"),
-				"is_regex":      boolProp("Treat query as regex", false),
-				"file_pattern":  stringProp("File filter"),
-				"max_results":   intPropWithDefault("Max results", 20),
-				"context_lines": intPropWithDefault("Context lines", 0),
+				"repo":            stringProp("Repository identifier"),
+				"query":           stringProp("Query"),
+				"is_regex":        boolProp("Treat query as regex", false),
+				"file_pattern":    stringProp("File filter"),
+				"max_results":     intPropWithDefault("Max results", 20),
+				"context_lines":   intPropWithDefault("Context lines", 0),
+				"retrieval_mode":  stringEnumPropWithDefault("Retrieval mode", []string{"lexical", "semantic", "hybrid"}, "lexical"),
+				"lexical_weight":  numberProp("Hybrid lexical weight override"),
+				"semantic_weight": numberProp("Hybrid semantic weight override"),
 			}, "repo", "query"),
 			Handler: stub,
 		},
@@ -337,6 +340,12 @@ func stringEnumProp(description string, values []string) map[string]any {
 	return property
 }
 
+func stringEnumPropWithDefault(description string, values []string, defaultValue string) map[string]any {
+	property := stringEnumProp(description, values)
+	property["default"] = defaultValue
+	return property
+}
+
 func boolProp(description string, value bool) map[string]any {
 	return map[string]any{
 		"type":        "boolean",
@@ -356,6 +365,13 @@ func intPropWithDefault(description string, value int) map[string]any {
 	property := intProp(description)
 	property["default"] = value
 	return property
+}
+
+func numberProp(description string) map[string]any {
+	return map[string]any{
+		"type":        "number",
+		"description": description,
+	}
 }
 
 func stringArrayProp(description string) map[string]any {
