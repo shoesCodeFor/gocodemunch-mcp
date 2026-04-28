@@ -16,6 +16,9 @@ make vector-up
 make vector-health
 make vector-down
 make vector-smoke
+make eval-smoke
+make eval-matrix
+make eval-gate
 make fmt
 make clean
 ```
@@ -41,10 +44,15 @@ Compiled binaries are written to `./bin`:
 - `make vector-health` – print and verify Qdrant health status from compose
 - `make vector-down` – stop and remove Qdrant compose resources
 - `make vector-smoke` – index fixture vectors and print top semantic matches
+- `make eval-smoke` – run non-interactive eval smoke with defaults (`ollama` + `sqlite`) and write JSON to `Auto Run Docs/Working/evals/eval-smoke.json`
+- `make eval-matrix` – run non-interactive eval matrix with defaults (`ollama,vllm` x `sqlite,qdrant`) and write JSON to `Auto Run Docs/Working/evals/eval-matrix.json`
+- `make eval-gate` – run non-interactive eval matrix with default thresholds (`min_mean_recall_at_k=0.70`, `min_mean_mrr_at_k=0.70`, `max_p50_latency_ms=5000`, `max_p95_latency_ms=5000`) and write JSON to `Auto Run Docs/Working/evals/eval-gate.json`
 - `make fmt` – format Go source files with `gofmt`
 - `make clean` – remove generated binaries from `bin/`
 - `make bench` – run the benchmark script
 - `make race` – run the race-detection script
+
+All three eval make targets are non-interactive and pass `--skip-markdown-report` by default. Override defaults with make variables like `EVAL_FIXTURES_DIR`, `EVAL_NAMESPACE_PREFIX`, `EVAL_SMOKE_PROVIDERS`, `EVAL_MATRIX_BACKENDS`, and `EVAL_GATE_MIN_MEAN_RECALL_AT_K`.
 
 ## Main server binary
 

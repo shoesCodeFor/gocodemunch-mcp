@@ -24,6 +24,8 @@ Goal: add a repeatable, non-interactive evaluation harness with quality/performa
 - [x] Add or update `docs/evals/Eval-Index.md` so each new run report is linked via wiki-link and listed newest-first.
   - Completed: Added `docs/evals/Eval-Index.md` with structured front matter and wiki-link index format, and updated `src/cmd/gocodemunch-eval/main.go` to automatically create/update the index on each markdown report write with deduplicated, newest-first run links.
   - Completed: Added deterministic coverage in `src/cmd/gocodemunch-eval/main_test.go` validating eval index creation, run-link insertion, deduplication, and newest-first ordering.
-- [ ] Add `make eval-smoke`, `make eval-matrix`, and `make eval-gate` targets in `Makefile` with documented defaults and non-interactive behavior.
+- [x] Add `make eval-smoke`, `make eval-matrix`, and `make eval-gate` targets in `Makefile` with documented defaults and non-interactive behavior.
+  - Completed: Added `eval-smoke`, `eval-matrix`, and `eval-gate` to `Makefile` with configurable defaults (`EVAL_*` variables), deterministic JSON outputs under `Auto Run Docs/Working/evals/`, and explicit non-interactive behavior via `--skip-markdown-report`.
+  - Completed: Updated `Makefile` help text and `README.md` target reference to document default provider/backend matrices, default gate thresholds, output paths, and common override variables.
 - [ ] Add eval runner integration tests for threshold failures and report output determinism, then run targeted eval tests.
 - [ ] Run `make eval-smoke` and `make eval-matrix` twice, verify stable baselines, and persist initial thresholds in the repo.
