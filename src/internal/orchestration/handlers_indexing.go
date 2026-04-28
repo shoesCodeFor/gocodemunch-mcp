@@ -29,6 +29,7 @@ const (
 	defaultMaxDiscoveryFileSize = 500 * 1024
 	defaultMaxFolderFiles       = 2000
 	defaultMaxIndexFiles        = 10000
+	vectorChunkIDsContextKey    = "_vector_chunk_ids_by_file"
 )
 
 var sourceExtensions = map[string]string{
@@ -389,13 +390,18 @@ func (s *Service) handleIndexRepo(ctx context.Context, arguments map[string]any)
 			if err := store.IncrementalSave(ctx, repoID, existing, changeSet); err != nil {
 				return nil, err
 			}
-			if err := s.upsertVectorsFromRemoteTree(
+			if err := s.syncRemoteIndexVectors(
 				ctx,
+				&existing,
 				repoID,
 				tree,
-				vectorUpsertCandidatePaths(changed, created),
+				changed,
+				created,
+				deleted,
 			); err != nil {
-				warnings = append(warnings, fmt.Sprintf("Vector upsert skipped: %v", err))
+				warnings = append(warnings, fmt.Sprintf("Vector sync skipped: %v", err))
+			} else if err := store.IncrementalSave(ctx, repoID, existing, storage.ChangeSet{}); err != nil {
+				return nil, err
 			}
 
 			return buildIndexRepoIncrementalSuccessResult(indexRepoIncrementalSuccessResultInput{
@@ -428,8 +434,10 @@ func (s *Service) handleIndexRepo(ctx context.Context, arguments map[string]any)
 		if err := store.Save(ctx, repoID, index); err != nil {
 			return nil, err
 		}
-		if err := s.upsertVectorsFromRemoteTree(ctx, repoID, tree, sourceFiles); err != nil {
-			warnings = append(warnings, fmt.Sprintf("Vector upsert skipped: %v", err))
+		if err := s.syncRemoteIndexVectors(ctx, &index, repoID, tree, sourceFiles, nil, nil); err != nil {
+			warnings = append(warnings, fmt.Sprintf("Vector sync skipped: %v", err))
+		} else if err := store.Save(ctx, repoID, index); err != nil {
+			return nil, err
 		}
 
 		return buildIndexRepoFullSuccessResult(indexRepoFullSuccessResultInput{
@@ -1608,7 +1616,7 @@ func (s *Service) handleIndexFolder(ctx context.Context, arguments map[string]an
 		}
 
 		if incremental && loadErr == nil {
-			fastPathResult, handled, fastErr := indexFolderFromChangedPaths(
+			fastPathResult, fastPathChangeSet, handled, fastErr := indexFolderFromChangedPaths(
 				ctx,
 				repoID,
 				resolvedPath,
@@ -1623,13 +1631,18 @@ func (s *Service) handleIndexFolder(ctx context.Context, arguments map[string]an
 				return nil, fastErr
 			}
 			if handled {
-				if err := s.upsertVectorsFromLocalFilesystem(
+				if err := s.syncLocalIndexVectors(
 					ctx,
+					&existing,
 					repoID,
 					resolvedPath,
-					parseVectorCandidatePathsFromChangedPaths(arguments["changed_paths"], resolvedPath),
+					fastPathChangeSet.Changed,
+					fastPathChangeSet.New,
+					fastPathChangeSet.Deleted,
 				); err != nil {
-					appendWarnings(fastPathResult, []string{fmt.Sprintf("Vector upsert skipped: %v", err)})
+					appendWarnings(fastPathResult, []string{fmt.Sprintf("Vector sync skipped: %v", err)})
+				} else if err := store.IncrementalSave(ctx, repoID, existing, storage.ChangeSet{}); err != nil {
+					return nil, err
 				}
 				appendWarnings(fastPathResult, preflightWarnings)
 				return fastPathResult, nil
@@ -1688,13 +1701,18 @@ func (s *Service) handleIndexFolder(ctx context.Context, arguments map[string]an
 			if err := store.IncrementalSave(ctx, repoID, existing, changeSet); err != nil {
 				return nil, err
 			}
-			if err := s.upsertVectorsFromLocalFilesystem(
+			if err := s.syncLocalIndexVectors(
 				ctx,
+				&existing,
 				repoID,
 				resolvedPath,
-				vectorUpsertCandidatePaths(changed, created),
+				changed,
+				created,
+				deleted,
 			); err != nil {
-				warnings = append(warnings, fmt.Sprintf("Vector upsert skipped: %v", err))
+				warnings = append(warnings, fmt.Sprintf("Vector sync skipped: %v", err))
+			} else if err := store.IncrementalSave(ctx, repoID, existing, storage.ChangeSet{}); err != nil {
+				return nil, err
 			}
 
 			return buildIndexFolderIncrementalSuccessResult(indexFolderIncrementalSuccessResultInput{
@@ -1727,8 +1745,10 @@ func (s *Service) handleIndexFolder(ctx context.Context, arguments map[string]an
 		if err := store.Save(ctx, repoID, index); err != nil {
 			return nil, err
 		}
-		if err := s.upsertVectorsFromLocalFilesystem(ctx, repoID, resolvedPath, sourceFiles); err != nil {
-			warnings = append(warnings, fmt.Sprintf("Vector upsert skipped: %v", err))
+		if err := s.syncLocalIndexVectors(ctx, &index, repoID, resolvedPath, sourceFiles, nil, nil); err != nil {
+			warnings = append(warnings, fmt.Sprintf("Vector sync skipped: %v", err))
+		} else if err := store.Save(ctx, repoID, index); err != nil {
+			return nil, err
 		}
 
 		return buildIndexFolderFullSuccessResult(indexFolderFullSuccessResultInput{
@@ -1890,8 +1910,9 @@ func (s *Service) handleIndexFile(ctx context.Context, arguments map[string]any)
 		if err := store.IncrementalSave(ctx, bestMatch.Repo, index, changes); err != nil {
 			return nil, err
 		}
-		if err := s.upsertIndexedVectorFiles(
+		if err := s.syncInlineIndexedVectorFiles(
 			ctx,
+			&index,
 			bestMatch.Repo,
 			[]indexedFileContent{
 				{
@@ -1904,8 +1925,13 @@ func (s *Service) handleIndexFile(ctx context.Context, arguments map[string]any)
 					},
 				},
 			},
+			changes.Changed,
+			changes.New,
+			nil,
 		); err != nil {
 			_ = err // Single-file indexing remains successful even when vector ingestion is unavailable.
+		} else if err := store.IncrementalSave(ctx, bestMatch.Repo, index, storage.ChangeSet{}); err != nil {
+			return nil, err
 		}
 
 		return buildIndexFileIncrementalSuccessResult(indexFileIncrementalSuccessResultInput{
@@ -2051,10 +2077,10 @@ func indexFolderFromChangedPaths(
 	nowRFC3339, indexedGitHead string,
 	started time.Time,
 	store storage.IndexStore,
-) (map[string]any, bool, error) {
+) (map[string]any, storage.ChangeSet, bool, error) {
 	changedPaths, provided := parseIndexFolderChangedPaths(rawChangedPaths, resolvedPath)
 	if !provided || len(changedPaths) == 0 {
-		return nil, false, nil
+		return nil, storage.ChangeSet{}, false, nil
 	}
 
 	if existing.Files == nil {
@@ -2090,7 +2116,7 @@ func indexFolderFromChangedPaths(
 
 	for _, relPath := range changedPaths {
 		if err := ctx.Err(); err != nil {
-			return nil, false, err
+			return nil, storage.ChangeSet{}, false, err
 		}
 
 		absolutePath := filepath.Join(resolvedPath, filepath.FromSlash(relPath))
@@ -2155,7 +2181,7 @@ func indexFolderFromChangedPaths(
 			resolvedPath: resolvedPath,
 			warnings:     warnings,
 			duration:     time.Since(started),
-		}), true, nil
+		}), storage.ChangeSet{}, true, nil
 	}
 
 	existing.Repo = repoID
@@ -2171,7 +2197,7 @@ func indexFolderFromChangedPaths(
 		Deleted: deleted,
 	}
 	if err := store.IncrementalSave(ctx, repoID, existing, changeSet); err != nil {
-		return nil, true, err
+		return nil, storage.ChangeSet{}, true, err
 	}
 
 	if len(changed) == 0 && len(created) == 0 && len(deleted) == 0 {
@@ -2180,7 +2206,7 @@ func indexFolderFromChangedPaths(
 			resolvedPath: resolvedPath,
 			warnings:     warnings,
 			duration:     time.Since(started),
-		}), true, nil
+		}), storage.ChangeSet{}, true, nil
 	}
 
 	return buildIndexFolderIncrementalSuccessResult(indexFolderIncrementalSuccessResultInput{
@@ -2194,7 +2220,7 @@ func indexFolderFromChangedPaths(
 		duration:          time.Since(started),
 		includeSkipCounts: false,
 		warnings:          warnings,
-	}), true, nil
+	}), changeSet, true, nil
 }
 
 func parseIndexFolderChangedPaths(rawChangedPaths any, root string) ([]string, bool) {
@@ -2286,14 +2312,6 @@ func parseChangedPathItem(item any) (changeType string, path string, ok bool) {
 	default:
 		return "", "", false
 	}
-}
-
-func parseVectorCandidatePathsFromChangedPaths(rawChangedPaths any, root string) []string {
-	paths, provided := parseIndexFolderChangedPaths(rawChangedPaths, root)
-	if !provided {
-		return nil
-	}
-	return paths
 }
 
 func vectorUpsertCandidatePaths(pathSets ...[]string) []string {
@@ -2450,11 +2468,21 @@ func (s *Service) upsertVectorsFromRemoteTree(
 	tree map[string][]byte,
 	relPaths []string,
 ) error {
+	_, err := s.upsertVectorsFromRemoteTreeWithChunkIDs(ctx, namespace, tree, relPaths)
+	return err
+}
+
+func (s *Service) upsertVectorsFromRemoteTreeWithChunkIDs(
+	ctx context.Context,
+	namespace string,
+	tree map[string][]byte,
+	relPaths []string,
+) (map[string][]string, error) {
 	files, err := collectIndexableRemoteFiles(namespace, tree, relPaths)
 	if err != nil {
-		return fmt.Errorf("prepare remote chunk vectors for %s: %w", namespace, err)
+		return nil, fmt.Errorf("prepare remote chunk vectors for %s: %w", namespace, err)
 	}
-	return s.upsertIndexedVectorFiles(ctx, namespace, files)
+	return s.upsertIndexedVectorFilesWithChunkIDs(ctx, namespace, files)
 }
 
 func (s *Service) upsertVectorsFromLocalFilesystem(
@@ -2463,11 +2491,21 @@ func (s *Service) upsertVectorsFromLocalFilesystem(
 	root string,
 	relPaths []string,
 ) error {
+	_, err := s.upsertVectorsFromLocalFilesystemWithChunkIDs(ctx, namespace, root, relPaths)
+	return err
+}
+
+func (s *Service) upsertVectorsFromLocalFilesystemWithChunkIDs(
+	ctx context.Context,
+	namespace string,
+	root string,
+	relPaths []string,
+) (map[string][]string, error) {
 	files, err := collectIndexableLocalFiles(ctx, namespace, root, relPaths)
 	if err != nil {
-		return fmt.Errorf("prepare local chunk vectors for %s: %w", namespace, err)
+		return nil, fmt.Errorf("prepare local chunk vectors for %s: %w", namespace, err)
 	}
-	return s.upsertIndexedVectorFiles(ctx, namespace, files)
+	return s.upsertIndexedVectorFilesWithChunkIDs(ctx, namespace, files)
 }
 
 func (s *Service) upsertIndexedVectorFiles(
@@ -2475,20 +2513,30 @@ func (s *Service) upsertIndexedVectorFiles(
 	namespace string,
 	files []indexedFileContent,
 ) error {
+	_, err := s.upsertIndexedVectorFilesWithChunkIDs(ctx, namespace, files)
+	return err
+}
+
+func (s *Service) upsertIndexedVectorFilesWithChunkIDs(
+	ctx context.Context,
+	namespace string,
+	files []indexedFileContent,
+) (map[string][]string, error) {
 	if len(files) == 0 {
-		return nil
+		return map[string][]string{}, nil
 	}
 
 	embedder := s.deps.Embedder
 	vectorBackend := s.deps.VectorBackend
 	if embedder == nil || vectorBackend == nil {
-		return nil
+		return map[string][]string{}, nil
 	}
 
 	chunks := buildDeterministicChunkMetadata(files)
 	if len(chunks) == 0 {
-		return nil
+		return map[string][]string{}, nil
 	}
+	chunkIDsByPath := collectChunkIDsByPath(chunks)
 
 	texts := make([]string, 0, len(chunks))
 	for _, chunk := range chunks {
@@ -2497,10 +2545,10 @@ func (s *Service) upsertIndexedVectorFiles(
 
 	embeddings, err := embedder.Embed(ctx, texts)
 	if err != nil {
-		return fmt.Errorf("embed indexed chunks for %s: %w", namespace, err)
+		return nil, fmt.Errorf("embed indexed chunks for %s: %w", namespace, err)
 	}
 	if len(embeddings) != len(chunks) {
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"embed indexed chunks for %s: embedding count mismatch (expected %d, got %d)",
 			namespace,
 			len(chunks),
@@ -2510,19 +2558,190 @@ func (s *Service) upsertIndexedVectorFiles(
 
 	records, err := buildVectorUpsertRecords(namespace, chunks, embeddings)
 	if err != nil {
-		return fmt.Errorf("prepare vector records for %s: %w", namespace, err)
+		return nil, fmt.Errorf("prepare vector records for %s: %w", namespace, err)
 	}
 	if len(records) == 0 {
-		return nil
+		return map[string][]string{}, nil
 	}
 
 	if _, err := vectorBackend.Upsert(ctx, indexing.VectorUpsertRequest{
 		Namespace: namespace,
 		Records:   records,
 	}); err != nil {
-		return fmt.Errorf("upsert chunk vectors for %s: %w", namespace, err)
+		return nil, fmt.Errorf("upsert chunk vectors for %s: %w", namespace, err)
 	}
 
+	return chunkIDsByPath, nil
+}
+
+func (s *Service) syncRemoteIndexVectors(
+	ctx context.Context,
+	index *storage.RepoIndex,
+	namespace string,
+	tree map[string][]byte,
+	changed []string,
+	created []string,
+	deleted []string,
+) error {
+	upsertCandidates := vectorUpsertCandidatePaths(changed, created)
+	if len(upsertCandidates) > 0 && s.deps.Embedder == nil {
+		upsertCandidates = nil
+	}
+	deletedCandidates := normalizeUniqueRepoPaths(deleted)
+
+	chunkIDsByPath := map[string][]string{}
+	if len(upsertCandidates) > 0 {
+		var err error
+		chunkIDsByPath, err = s.upsertVectorsFromRemoteTreeWithChunkIDs(ctx, namespace, tree, upsertCandidates)
+		if err != nil {
+			return err
+		}
+	}
+	return s.syncVectorIndexMetadata(ctx, index, namespace, upsertCandidates, deletedCandidates, chunkIDsByPath)
+}
+
+func (s *Service) syncLocalIndexVectors(
+	ctx context.Context,
+	index *storage.RepoIndex,
+	namespace string,
+	root string,
+	changed []string,
+	created []string,
+	deleted []string,
+) error {
+	upsertCandidates := vectorUpsertCandidatePaths(changed, created)
+	if len(upsertCandidates) > 0 && s.deps.Embedder == nil {
+		upsertCandidates = nil
+	}
+	deletedCandidates := normalizeUniqueRepoPaths(deleted)
+
+	chunkIDsByPath := map[string][]string{}
+	if len(upsertCandidates) > 0 {
+		var err error
+		chunkIDsByPath, err = s.upsertVectorsFromLocalFilesystemWithChunkIDs(ctx, namespace, root, upsertCandidates)
+		if err != nil {
+			return err
+		}
+	}
+	return s.syncVectorIndexMetadata(ctx, index, namespace, upsertCandidates, deletedCandidates, chunkIDsByPath)
+}
+
+func (s *Service) syncInlineIndexedVectorFiles(
+	ctx context.Context,
+	index *storage.RepoIndex,
+	namespace string,
+	files []indexedFileContent,
+	changed []string,
+	created []string,
+	deleted []string,
+) error {
+	upsertCandidates := vectorUpsertCandidatePaths(changed, created)
+	if len(upsertCandidates) > 0 && s.deps.Embedder == nil {
+		upsertCandidates = nil
+	}
+	deletedCandidates := normalizeUniqueRepoPaths(deleted)
+
+	chunkIDsByPath := map[string][]string{}
+	if len(upsertCandidates) > 0 {
+		var err error
+		chunkIDsByPath, err = s.upsertIndexedVectorFilesWithChunkIDs(ctx, namespace, files)
+		if err != nil {
+			return err
+		}
+	}
+	return s.syncVectorIndexMetadata(ctx, index, namespace, upsertCandidates, deletedCandidates, chunkIDsByPath)
+}
+
+func (s *Service) syncVectorIndexMetadata(
+	ctx context.Context,
+	index *storage.RepoIndex,
+	namespace string,
+	upsertedPaths []string,
+	deletedPaths []string,
+	upsertedChunkIDs map[string][]string,
+) error {
+	vectorBackend := s.deps.VectorBackend
+	if vectorBackend == nil || index == nil {
+		return nil
+	}
+
+	existingChunkIDs := loadVectorChunkIDsByPath(index.ContextMetadata)
+	if len(existingChunkIDs) == 0 && len(upsertedPaths) == 0 && len(deletedPaths) == 0 {
+		return nil
+	}
+
+	staleChunkIDs := make([]string, 0)
+	for _, path := range deletedPaths {
+		staleChunkIDs = append(staleChunkIDs, existingChunkIDs[path]...)
+	}
+	for _, path := range upsertedPaths {
+		previous := existingChunkIDs[path]
+		next := upsertedChunkIDs[path]
+		staleChunkIDs = append(staleChunkIDs, diffVectorIDs(previous, next)...)
+	}
+	staleChunkIDs = normalizeUniqueVectorIDs(staleChunkIDs)
+	if len(staleChunkIDs) > 0 {
+		if err := s.deleteVectorRecordIDs(ctx, namespace, staleChunkIDs); err != nil {
+			return err
+		}
+	}
+
+	for _, path := range deletedPaths {
+		delete(existingChunkIDs, path)
+	}
+	for _, path := range upsertedPaths {
+		next := normalizeUniqueVectorIDs(upsertedChunkIDs[path])
+		if len(next) == 0 {
+			delete(existingChunkIDs, path)
+			continue
+		}
+		existingChunkIDs[path] = next
+	}
+	writeVectorChunkIDsByPath(index, existingChunkIDs)
+	return nil
+}
+
+func (s *Service) deleteVectorRecordIDs(
+	ctx context.Context,
+	namespace string,
+	recordIDs []string,
+) error {
+	vectorBackend := s.deps.VectorBackend
+	if vectorBackend == nil {
+		return nil
+	}
+
+	namespace = strings.TrimSpace(namespace)
+	recordIDs = normalizeUniqueVectorIDs(recordIDs)
+	if namespace == "" || len(recordIDs) == 0 {
+		return nil
+	}
+
+	if _, err := vectorBackend.Delete(ctx, indexing.VectorDeleteRequest{
+		Namespace: namespace,
+		IDs:       recordIDs,
+	}); err != nil {
+		return fmt.Errorf("delete chunk vectors for %s: %w", namespace, err)
+	}
+	return nil
+}
+
+func (s *Service) deleteVectorNamespace(ctx context.Context, namespace string) error {
+	vectorBackend := s.deps.VectorBackend
+	if vectorBackend == nil {
+		return nil
+	}
+
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return nil
+	}
+
+	if _, err := vectorBackend.DeleteNamespace(ctx, indexing.VectorDeleteNamespaceRequest{
+		Namespace: namespace,
+	}); err != nil {
+		return fmt.Errorf("delete vector namespace for %s: %w", namespace, err)
+	}
 	return nil
 }
 
@@ -2567,6 +2786,156 @@ func cloneEmbeddingVector(values []float32) []float32 {
 	cloned := make([]float32, len(values))
 	copy(cloned, values)
 	return cloned
+}
+
+func collectChunkIDsByPath(chunks []indexing.VectorMetadata) map[string][]string {
+	if len(chunks) == 0 {
+		return map[string][]string{}
+	}
+
+	byPath := map[string][]string{}
+	for _, chunk := range chunks {
+		relPath := normalizeChunkPath(chunk.Path)
+		chunkID := strings.TrimSpace(chunk.ChunkID)
+		if relPath == "" || chunkID == "" {
+			continue
+		}
+		byPath[relPath] = append(byPath[relPath], chunkID)
+	}
+	for relPath, ids := range byPath {
+		byPath[relPath] = normalizeUniqueVectorIDs(ids)
+	}
+	return byPath
+}
+
+func loadVectorChunkIDsByPath(contextMetadata map[string]any) map[string][]string {
+	if len(contextMetadata) == 0 {
+		return map[string][]string{}
+	}
+
+	raw, ok := contextMetadata[vectorChunkIDsContextKey]
+	if !ok {
+		return map[string][]string{}
+	}
+
+	parsed := map[string][]string{}
+	switch typed := raw.(type) {
+	case map[string][]string:
+		for rawPath, rawIDs := range typed {
+			relPath := normalizeChunkPath(rawPath)
+			if relPath == "" {
+				continue
+			}
+			ids := normalizeUniqueVectorIDs(rawIDs)
+			if len(ids) == 0 {
+				continue
+			}
+			parsed[relPath] = ids
+		}
+	case map[string]any:
+		for rawPath, value := range typed {
+			relPath := normalizeChunkPath(rawPath)
+			if relPath == "" {
+				continue
+			}
+			ids := parseVectorIDList(value)
+			if len(ids) == 0 {
+				continue
+			}
+			parsed[relPath] = ids
+		}
+	}
+	return parsed
+}
+
+func parseVectorIDList(raw any) []string {
+	switch typed := raw.(type) {
+	case []string:
+		return normalizeUniqueVectorIDs(typed)
+	case []any:
+		ids := make([]string, 0, len(typed))
+		for _, value := range typed {
+			text := strings.TrimSpace(fmt.Sprintf("%v", value))
+			if text == "" || text == "<nil>" {
+				continue
+			}
+			ids = append(ids, text)
+		}
+		return normalizeUniqueVectorIDs(ids)
+	default:
+		return nil
+	}
+}
+
+func writeVectorChunkIDsByPath(index *storage.RepoIndex, byPath map[string][]string) {
+	if index == nil {
+		return
+	}
+	if index.ContextMetadata == nil {
+		index.ContextMetadata = map[string]any{}
+	}
+
+	cleaned := map[string][]string{}
+	for rawPath, rawIDs := range byPath {
+		relPath := normalizeChunkPath(rawPath)
+		if relPath == "" {
+			continue
+		}
+		ids := normalizeUniqueVectorIDs(rawIDs)
+		if len(ids) == 0 {
+			continue
+		}
+		cleaned[relPath] = ids
+	}
+	if len(cleaned) == 0 {
+		delete(index.ContextMetadata, vectorChunkIDsContextKey)
+		return
+	}
+	index.ContextMetadata[vectorChunkIDsContextKey] = cleaned
+}
+
+func diffVectorIDs(previous []string, next []string) []string {
+	if len(previous) == 0 {
+		return nil
+	}
+	nextSet := map[string]struct{}{}
+	for _, id := range normalizeUniqueVectorIDs(next) {
+		nextSet[id] = struct{}{}
+	}
+
+	stale := make([]string, 0, len(previous))
+	for _, id := range normalizeUniqueVectorIDs(previous) {
+		if _, ok := nextSet[id]; ok {
+			continue
+		}
+		stale = append(stale, id)
+	}
+	return stale
+}
+
+func normalizeUniqueVectorIDs(ids []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	unique := map[string]struct{}{}
+	for _, rawID := range ids {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			continue
+		}
+		unique[id] = struct{}{}
+	}
+	if len(unique) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(unique))
+	for id := range unique {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func sortedSetMembers(values map[string]struct{}) []string {

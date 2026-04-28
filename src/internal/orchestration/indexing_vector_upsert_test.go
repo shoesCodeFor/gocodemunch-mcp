@@ -34,7 +34,9 @@ func (e *embedderSpy) reset() {
 }
 
 type vectorBackendSpy struct {
-	upserts []indexing.VectorUpsertRequest
+	upserts          []indexing.VectorUpsertRequest
+	deletes          []indexing.VectorDeleteRequest
+	deleteNamespaces []indexing.VectorDeleteNamespaceRequest
 }
 
 func (v *vectorBackendSpy) Upsert(
@@ -54,15 +56,17 @@ func (v *vectorBackendSpy) Query(
 
 func (v *vectorBackendSpy) Delete(
 	_ context.Context,
-	_ indexing.VectorDeleteRequest,
+	request indexing.VectorDeleteRequest,
 ) (indexing.VectorDeleteResponse, error) {
-	return indexing.VectorDeleteResponse{}, nil
+	v.deletes = append(v.deletes, cloneDeleteRequest(request))
+	return indexing.VectorDeleteResponse{Deleted: len(request.IDs)}, nil
 }
 
 func (v *vectorBackendSpy) DeleteNamespace(
 	_ context.Context,
-	_ indexing.VectorDeleteNamespaceRequest,
+	request indexing.VectorDeleteNamespaceRequest,
 ) (indexing.VectorDeleteNamespaceResponse, error) {
+	v.deleteNamespaces = append(v.deleteNamespaces, request)
 	return indexing.VectorDeleteNamespaceResponse{}, nil
 }
 
@@ -72,6 +76,8 @@ func (v *vectorBackendSpy) Health(_ context.Context) (indexing.VectorHealthRespo
 
 func (v *vectorBackendSpy) reset() {
 	v.upserts = nil
+	v.deletes = nil
+	v.deleteNamespaces = nil
 }
 
 func cloneUpsertRequest(request indexing.VectorUpsertRequest) indexing.VectorUpsertRequest {
@@ -87,6 +93,13 @@ func cloneUpsertRequest(request indexing.VectorUpsertRequest) indexing.VectorUps
 	return indexing.VectorUpsertRequest{
 		Namespace: request.Namespace,
 		Records:   clonedRecords,
+	}
+}
+
+func cloneDeleteRequest(request indexing.VectorDeleteRequest) indexing.VectorDeleteRequest {
+	return indexing.VectorDeleteRequest{
+		Namespace: request.Namespace,
+		IDs:       append([]string(nil), request.IDs...),
 	}
 }
 
@@ -188,6 +201,10 @@ func TestIndexFolderChangedPathsUpsertsModifiedAndAddedFiles(t *testing.T) {
 	if success, _ := initial["success"].(bool); !success {
 		t.Fatalf("initial index_folder failed: %#v", initial)
 	}
+	legacyChunkIDs := upsertRequestIDsForPath(vectorBackend.upserts[0], "legacy.go")
+	if len(legacyChunkIDs) == 0 {
+		t.Fatalf("expected initial legacy.go chunk ids, got %#v", vectorBackend.upserts[0])
+	}
 	embedder.reset()
 	vectorBackend.reset()
 
@@ -229,11 +246,18 @@ func TestIndexFolderChangedPathsUpsertsModifiedAndAddedFiles(t *testing.T) {
 	if len(vectorBackend.upserts) != 1 {
 		t.Fatalf("expected one vector upsert for changed_paths flow, got %d", len(vectorBackend.upserts))
 	}
+	if len(vectorBackend.deletes) == 0 {
+		t.Fatalf("expected vector delete for removed/stale chunks, got %#v", vectorBackend.deletes)
+	}
 
 	gotPaths := upsertRequestPaths(vectorBackend.upserts[0])
 	wantPaths := []string{"main.py", "ui.ts"}
 	if !reflect.DeepEqual(gotPaths, wantPaths) {
 		t.Fatalf("unexpected changed_paths upsert paths: got %#v, want %#v", gotPaths, wantPaths)
+	}
+	deletedIDs := deleteRequestIDs(vectorBackend.deletes...)
+	if !containsAllStrings(deletedIDs, legacyChunkIDs) {
+		t.Fatalf("expected deleted IDs to include legacy.go chunks: deleted=%#v legacy=%#v", deletedIDs, legacyChunkIDs)
 	}
 }
 
@@ -266,6 +290,10 @@ func TestIndexFileUpsertsOnlyOnContentChange(t *testing.T) {
 	if success, _ := indexed["success"].(bool); !success {
 		t.Fatalf("initial index_folder failed: %#v", indexed)
 	}
+	previousChunkIDs := upsertRequestIDsForPath(vectorBackend.upserts[0], "main.py")
+	if len(previousChunkIDs) == 0 {
+		t.Fatalf("expected initial main.py chunk ids, got %#v", vectorBackend.upserts[0])
+	}
 	embedder.reset()
 	vectorBackend.reset()
 
@@ -297,8 +325,15 @@ func TestIndexFileUpsertsOnlyOnContentChange(t *testing.T) {
 	if len(vectorBackend.upserts) != 1 {
 		t.Fatalf("expected one vector upsert for changed file, got %d", len(vectorBackend.upserts))
 	}
+	if len(vectorBackend.deletes) == 0 {
+		t.Fatalf("expected stale vector delete for changed file, got %#v", vectorBackend.deletes)
+	}
 	if got := upsertRequestPaths(vectorBackend.upserts[0]); !reflect.DeepEqual(got, []string{"main.py"}) {
 		t.Fatalf("unexpected upsert paths for changed file: %#v", got)
+	}
+	deletedIDs := deleteRequestIDs(vectorBackend.deletes...)
+	if !containsAllStrings(deletedIDs, previousChunkIDs) {
+		t.Fatalf("expected changed-file delete ids to include previous chunks: deleted=%#v previous=%#v", deletedIDs, previousChunkIDs)
 	}
 }
 
@@ -372,6 +407,75 @@ func TestIndexRepoUpsertsRemoteVectorChunks(t *testing.T) {
 	if !reflect.DeepEqual(gotPaths, wantPaths) {
 		t.Fatalf("unexpected incremental index_repo upsert paths: got %#v, want %#v", gotPaths, wantPaths)
 	}
+
+	removedChunkIDs := upsertRequestIDsForPath(vectorBackend.upserts[0], "pkg/new.py")
+	if len(removedChunkIDs) == 0 {
+		t.Fatalf("expected pkg/new.py chunk ids after incremental upsert, got %#v", vectorBackend.upserts[0])
+	}
+
+	embedder.reset()
+	vectorBackend.reset()
+	acquirer.tree = map[string][]byte{
+		"src/main.go": []byte("package main\n\nfunc main() {}\n"),
+	}
+
+	deletionRun := service.CallTool(context.Background(), "index_repo", map[string]any{
+		"url":         "https://github.com/org/repo",
+		"incremental": true,
+	})
+	if success, _ := deletionRun["success"].(bool); !success {
+		t.Fatalf("incremental delete index_repo failed: %#v", deletionRun)
+	}
+	if got, _ := deletionRun["deleted"].(int); got != 1 {
+		t.Fatalf("expected deleted=1, got %#v", deletionRun)
+	}
+	deletedIDs := deleteRequestIDs(vectorBackend.deletes...)
+	if !containsAllStrings(deletedIDs, removedChunkIDs) {
+		t.Fatalf("expected deleted ids to include removed remote file chunks: deleted=%#v removed=%#v", deletedIDs, removedChunkIDs)
+	}
+}
+
+func TestInvalidateCacheDeletesVectorNamespace(t *testing.T) {
+	store := mustIndexStore(t)
+	vectorBackend := &vectorBackendSpy{}
+
+	service := New(config.Config{
+		ServerName:    "gocodemunch-mcp",
+		ServerVersion: "test",
+		FreshnessMode: "relaxed",
+		Disabled:      map[string]struct{}{},
+	}, Dependencies{
+		IndexStore:    store,
+		VectorBackend: vectorBackend,
+	})
+
+	repoRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoRoot, "main.py"), []byte("def main():\n    return 1\n"), 0o644); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+
+	indexed := service.CallTool(context.Background(), "index_folder", map[string]any{
+		"path":        repoRoot,
+		"incremental": false,
+	})
+	if success, _ := indexed["success"].(bool); !success {
+		t.Fatalf("initial index_folder failed: %#v", indexed)
+	}
+	repoID, _ := indexed["repo"].(string)
+	vectorBackend.reset()
+
+	invalidate := service.CallTool(context.Background(), "invalidate_cache", map[string]any{
+		"repo": repoID,
+	})
+	if success, _ := invalidate["success"].(bool); !success {
+		t.Fatalf("invalidate_cache failed: %#v", invalidate)
+	}
+	if len(vectorBackend.deleteNamespaces) != 1 {
+		t.Fatalf("expected one vector namespace delete call, got %#v", vectorBackend.deleteNamespaces)
+	}
+	if got := vectorBackend.deleteNamespaces[0].Namespace; got != repoID {
+		t.Fatalf("expected namespace delete for %q, got %#v", repoID, vectorBackend.deleteNamespaces[0])
+	}
 }
 
 func upsertRequestPaths(request indexing.VectorUpsertRequest) []string {
@@ -385,4 +489,46 @@ func upsertRequestPaths(request indexing.VectorUpsertRequest) []string {
 	}
 	sort.Strings(paths)
 	return paths
+}
+
+func upsertRequestIDsForPath(request indexing.VectorUpsertRequest, path string) []string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+
+	ids := make([]string, 0)
+	for _, record := range request.Records {
+		if record.Metadata.Path != path {
+			continue
+		}
+		ids = append(ids, record.ID)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func deleteRequestIDs(requests ...indexing.VectorDeleteRequest) []string {
+	ids := make([]string, 0)
+	for _, request := range requests {
+		ids = append(ids, request.IDs...)
+	}
+	return normalizeUniqueVectorIDs(ids)
+}
+
+func containsAllStrings(haystack []string, needles []string) bool {
+	if len(needles) == 0 {
+		return true
+	}
+
+	seen := map[string]struct{}{}
+	for _, value := range haystack {
+		seen[value] = struct{}{}
+	}
+	for _, value := range needles {
+		if _, ok := seen[value]; !ok {
+			return false
+		}
+	}
+	return true
 }

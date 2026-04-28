@@ -369,6 +369,11 @@ func (s *Service) handleInvalidateCache(ctx context.Context, arguments map[strin
 		return nil, err
 	}
 	sourceRoot := strings.TrimSpace(index.SourceRoot)
+	warnings := make([]string, 0, 1)
+
+	if err := s.deleteVectorNamespace(ctx, repoID); err != nil {
+		warnings = append(warnings, fmt.Sprintf("Vector namespace delete skipped: %v", err))
+	}
 
 	if err := store.Delete(ctx, repoID); err != nil {
 		return nil, err
@@ -377,11 +382,13 @@ func (s *Service) handleInvalidateCache(ctx context.Context, arguments map[strin
 		_ = controller.Stop(ctx, sourceRoot)
 	}
 
-	return map[string]any{
+	result := map[string]any{
 		"success": true,
 		"repo":    repoID,
 		"message": fmt.Sprintf("Index and cached files deleted for %s", repoID),
-	}, nil
+	}
+	appendWarnings(result, warnings)
+	return result, nil
 }
 
 func (s *Service) handleSearchSymbols(ctx context.Context, arguments map[string]any) (map[string]any, error) {
