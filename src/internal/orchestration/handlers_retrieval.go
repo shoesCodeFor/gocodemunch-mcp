@@ -19,6 +19,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/jgravelle/gocodemunch-mcp/src/internal/domain/indexing"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/storage"
 )
 
@@ -26,6 +27,7 @@ const (
 	searchTextMaxQueryLength    = 500
 	searchTextMaxRegexLength    = 200
 	searchTextMaxLineLength     = 200
+	searchTextHybridScanLimit   = 250
 	searchSymbolsMaxQueryLength = 500
 	searchSymbolsBytesPerToken  = 4
 	searchSymbolsMinByteLength  = 20
@@ -173,6 +175,25 @@ type scoredRelatedSymbol struct {
 type rankedIntKey struct {
 	Key   string
 	Count int
+}
+
+type searchTextRetrievalMode string
+
+const (
+	searchTextRetrievalModeLexical  searchTextRetrievalMode = "lexical"
+	searchTextRetrievalModeSemantic searchTextRetrievalMode = "semantic"
+	searchTextRetrievalModeHybrid   searchTextRetrievalMode = "hybrid"
+)
+
+type searchTextMatchCandidate struct {
+	File          string
+	Line          int
+	Text          string
+	Before        []string
+	After         []string
+	LexicalScore  float64
+	SemanticScore float64
+	HybridScore   float64
 }
 
 func (s *Service) handleGetFileTree(ctx context.Context, arguments map[string]any) (map[string]any, error) {
@@ -1226,6 +1247,11 @@ func (s *Service) handleSearchText(ctx context.Context, arguments map[string]any
 		return map[string]any{"error": fmt.Sprintf("Repository not found: %s", repoInput)}, nil
 	}
 
+	mode, modeErr := parseSearchTextRetrievalMode(arguments)
+	if modeErr != nil {
+		return map[string]any{"error": modeErr.Error()}, nil
+	}
+
 	query := stringArg(arguments, "query", "")
 	if len(query) > searchTextMaxQueryLength {
 		return map[string]any{
@@ -1285,96 +1311,201 @@ func (s *Service) handleSearchText(ctx context.Context, arguments map[string]any
 	}
 
 	sourceRoot := filepath.Clean(strings.TrimSpace(index.SourceRoot))
-	results := make([]map[string]any, 0, len(filteredFiles))
-	resultCount := 0
-	filesSearched := 0
-	truncated := false
-	for _, filePath := range filteredFiles {
-		if sourceRoot == "" {
-			continue
-		}
-
-		absoluteFile := filepath.Clean(filepath.Join(sourceRoot, filepath.FromSlash(filePath)))
-		if !pathWithin(sourceRoot, absoluteFile) {
-			continue
-		}
-
-		contentBytes, readErr := os.ReadFile(absoluteFile)
-		if readErr != nil {
-			continue
-		}
-		lines := splitContentLines(string(contentBytes))
-		filesSearched++
-
-		fileMatches := make([]map[string]any, 0, 4)
-		for lineIndex, line := range lines {
-			matched := false
-			if pattern != nil {
-				matched = pattern.MatchString(line)
-			} else {
-				matched = strings.Contains(strings.ToLower(line), queryLower)
-			}
-			if !matched {
+	if mode == searchTextRetrievalModeLexical {
+		results := make([]map[string]any, 0, len(filteredFiles))
+		resultCount := 0
+		filesSearched := 0
+		truncated := false
+		for _, filePath := range filteredFiles {
+			if sourceRoot == "" {
 				continue
 			}
 
-			match := map[string]any{
-				"line": lineIndex + 1,
-				"text": trimAndClampSearchTextLine(line),
-			}
-			if contextLines > 0 {
-				beforeStart := lineIndex - contextLines
-				if beforeStart < 0 {
-					beforeStart = 0
-				}
-				afterEnd := lineIndex + contextLines + 1
-				if afterEnd > len(lines) {
-					afterEnd = len(lines)
-				}
-
-				before := make([]string, 0, lineIndex-beforeStart)
-				for _, item := range lines[beforeStart:lineIndex] {
-					before = append(before, trimAndClampSearchTextLine(item))
-				}
-
-				after := make([]string, 0, afterEnd-lineIndex-1)
-				for _, item := range lines[lineIndex+1 : afterEnd] {
-					after = append(after, trimAndClampSearchTextLine(item))
-				}
-
-				match["before"] = before
-				match["after"] = after
+			absoluteFile := filepath.Clean(filepath.Join(sourceRoot, filepath.FromSlash(filePath)))
+			if !pathWithin(sourceRoot, absoluteFile) {
+				continue
 			}
 
-			fileMatches = append(fileMatches, match)
-			resultCount++
-			if resultCount >= maxResults {
-				truncated = true
+			contentBytes, readErr := os.ReadFile(absoluteFile)
+			if readErr != nil {
+				continue
+			}
+			lines := splitContentLines(string(contentBytes))
+			filesSearched++
+
+			fileMatches := make([]map[string]any, 0, 4)
+			for lineIndex, line := range lines {
+				matched := false
+				if pattern != nil {
+					matched = pattern.MatchString(line)
+				} else {
+					matched = strings.Contains(strings.ToLower(line), queryLower)
+				}
+				if !matched {
+					continue
+				}
+
+				match := map[string]any{
+					"line": lineIndex + 1,
+					"text": trimAndClampSearchTextLine(line),
+				}
+				if contextLines > 0 {
+					beforeStart := lineIndex - contextLines
+					if beforeStart < 0 {
+						beforeStart = 0
+					}
+					afterEnd := lineIndex + contextLines + 1
+					if afterEnd > len(lines) {
+						afterEnd = len(lines)
+					}
+
+					before := make([]string, 0, lineIndex-beforeStart)
+					for _, item := range lines[beforeStart:lineIndex] {
+						before = append(before, trimAndClampSearchTextLine(item))
+					}
+
+					after := make([]string, 0, afterEnd-lineIndex-1)
+					for _, item := range lines[lineIndex+1 : afterEnd] {
+						after = append(after, trimAndClampSearchTextLine(item))
+					}
+
+					match["before"] = before
+					match["after"] = after
+				}
+
+				fileMatches = append(fileMatches, match)
+				resultCount++
+				if resultCount >= maxResults {
+					truncated = true
+					break
+				}
+			}
+
+			if len(fileMatches) > 0 {
+				results = append(results, map[string]any{
+					"file":    filePath,
+					"matches": fileMatches,
+				})
+			}
+			if truncated {
 				break
 			}
 		}
 
-		if len(fileMatches) > 0 {
-			results = append(results, map[string]any{
-				"file":    filePath,
-				"matches": fileMatches,
-			})
-		}
-		if truncated {
-			break
+		return map[string]any{
+			"result_count": resultCount,
+			"results":      results,
+			"_meta": map[string]any{
+				"timing_ms":          roundMilliseconds(time.Since(started)),
+				"files_searched":     filesSearched,
+				"truncated":          truncated,
+				"tokens_saved":       0,
+				"total_tokens_saved": 0,
+			},
+		}, nil
+	}
+
+	embedder := s.deps.Embedder
+	vectorBackend := s.deps.VectorBackend
+	if embedder == nil || vectorBackend == nil {
+		return map[string]any{
+			"error": "Semantic retrieval unavailable: embedding/vector dependencies are not configured.",
+		}, nil
+	}
+
+	semanticTopK := s.cfg.VectorTopK
+	if semanticTopK <= 0 {
+		semanticTopK = maxResults
+	}
+	if semanticTopK < maxResults {
+		semanticTopK = maxResults
+	}
+	if mode == searchTextRetrievalModeHybrid {
+		hybridTopK := maxResults * 3
+		if hybridTopK > semanticTopK {
+			semanticTopK = hybridTopK
 		}
 	}
 
+	semanticCandidates, semanticErr := collectSemanticSearchTextCandidates(
+		ctx,
+		embedder,
+		vectorBackend,
+		repoID,
+		query,
+		filePattern,
+		contextLines,
+		semanticTopK,
+		sourceRoot,
+	)
+	if semanticErr != nil {
+		return nil, semanticErr
+	}
+
+	filesSearched := len(filteredFiles)
+	var rankedCandidates []searchTextMatchCandidate
+	meta := map[string]any{
+		"timing_ms":          roundMilliseconds(time.Since(started)),
+		"files_searched":     filesSearched,
+		"retrieval_mode":     string(mode),
+		"tokens_saved":       0,
+		"total_tokens_saved": 0,
+	}
+
+	if mode == searchTextRetrievalModeHybrid {
+		lexicalLimit := searchTextHybridScanLimit
+		if maxResults*4 > lexicalLimit {
+			lexicalLimit = maxResults * 4
+		}
+		lexicalCandidates, lexicalFilesSearched, _ := collectLexicalSearchTextCandidates(
+			filteredFiles,
+			sourceRoot,
+			queryLower,
+			pattern,
+			contextLines,
+			lexicalLimit,
+		)
+		if lexicalFilesSearched > filesSearched {
+			filesSearched = lexicalFilesSearched
+			meta["files_searched"] = filesSearched
+		}
+
+		lexicalWeight, semanticWeight := s.resolveSearchTextHybridWeights(arguments)
+		meta["lexical_weight"] = lexicalWeight
+		meta["semantic_weight"] = semanticWeight
+		rankedCandidates = rankHybridSearchTextCandidates(
+			lexicalCandidates,
+			semanticCandidates,
+			lexicalWeight,
+			semanticWeight,
+		)
+	} else {
+		rankedCandidates = append([]searchTextMatchCandidate(nil), semanticCandidates...)
+		sort.SliceStable(rankedCandidates, func(i, j int) bool {
+			if rankedCandidates[i].SemanticScore != rankedCandidates[j].SemanticScore {
+				return rankedCandidates[i].SemanticScore > rankedCandidates[j].SemanticScore
+			}
+			if rankedCandidates[i].File != rankedCandidates[j].File {
+				return rankedCandidates[i].File < rankedCandidates[j].File
+			}
+			if rankedCandidates[i].Line != rankedCandidates[j].Line {
+				return rankedCandidates[i].Line < rankedCandidates[j].Line
+			}
+			return rankedCandidates[i].Text < rankedCandidates[j].Text
+		})
+	}
+
+	truncated := false
+	if len(rankedCandidates) > maxResults {
+		rankedCandidates = rankedCandidates[:maxResults]
+		truncated = true
+	}
+	meta["truncated"] = truncated
+
 	return map[string]any{
-		"result_count": resultCount,
-		"results":      results,
-		"_meta": map[string]any{
-			"timing_ms":          roundMilliseconds(time.Since(started)),
-			"files_searched":     filesSearched,
-			"truncated":          truncated,
-			"tokens_saved":       0,
-			"total_tokens_saved": 0,
-		},
+		"result_count": len(rankedCandidates),
+		"results":      buildSearchTextGroupedResults(rankedCandidates, contextLines, mode),
+		"_meta":        meta,
 	}, nil
 }
 
@@ -4018,6 +4149,457 @@ func trimAndClampSearchTextLine(line string) string {
 	return string(runes[:searchTextMaxLineLength])
 }
 
+func parseSearchTextRetrievalMode(arguments map[string]any) (searchTextRetrievalMode, error) {
+	raw := strings.TrimSpace(stringArg(arguments, "retrieval_mode", ""))
+	if raw == "" {
+		raw = strings.TrimSpace(stringArg(arguments, "mode", ""))
+	}
+	if raw == "" {
+		return searchTextRetrievalModeLexical, nil
+	}
+
+	switch normalized := strings.ToLower(raw); normalized {
+	case string(searchTextRetrievalModeLexical):
+		return searchTextRetrievalModeLexical, nil
+	case string(searchTextRetrievalModeSemantic):
+		return searchTextRetrievalModeSemantic, nil
+	case string(searchTextRetrievalModeHybrid):
+		return searchTextRetrievalModeHybrid, nil
+	default:
+		return "", fmt.Errorf(
+			`Unsupported retrieval_mode %q. Use one of: "lexical", "semantic", "hybrid".`,
+			raw,
+		)
+	}
+}
+
+func collectLexicalSearchTextCandidates(
+	filteredFiles []string,
+	sourceRoot string,
+	queryLower string,
+	pattern *regexp.Regexp,
+	contextLines int,
+	limit int,
+) ([]searchTextMatchCandidate, int, bool) {
+	if limit <= 0 {
+		return []searchTextMatchCandidate{}, 0, false
+	}
+
+	candidates := make([]searchTextMatchCandidate, 0, limit)
+	filesSearched := 0
+	truncated := false
+	for _, filePath := range filteredFiles {
+		if sourceRoot == "" {
+			continue
+		}
+
+		absoluteFile := filepath.Clean(filepath.Join(sourceRoot, filepath.FromSlash(filePath)))
+		if !pathWithin(sourceRoot, absoluteFile) {
+			continue
+		}
+
+		contentBytes, readErr := os.ReadFile(absoluteFile)
+		if readErr != nil {
+			continue
+		}
+		lines := splitContentLines(string(contentBytes))
+		filesSearched++
+
+		for lineIndex, line := range lines {
+			matched := false
+			if pattern != nil {
+				matched = pattern.MatchString(line)
+			} else {
+				matched = strings.Contains(strings.ToLower(line), queryLower)
+			}
+			if !matched {
+				continue
+			}
+
+			before, after := []string{}, []string{}
+			if contextLines > 0 {
+				before, after = buildSearchTextContextFromLines(lines, lineIndex+1, contextLines)
+			}
+
+			candidates = append(candidates, searchTextMatchCandidate{
+				File:         filePath,
+				Line:         lineIndex + 1,
+				Text:         trimAndClampSearchTextLine(line),
+				Before:       before,
+				After:        after,
+				LexicalScore: lexicalSearchTextScore(line, queryLower, pattern),
+			})
+			if len(candidates) >= limit {
+				truncated = true
+				break
+			}
+		}
+		if truncated {
+			break
+		}
+	}
+
+	return candidates, filesSearched, truncated
+}
+
+func lexicalSearchTextScore(line, queryLower string, pattern *regexp.Regexp) float64 {
+	if pattern != nil {
+		matchCount := len(pattern.FindAllStringIndex(line, -1))
+		if matchCount <= 0 {
+			return 1
+		}
+		return float64(matchCount)
+	}
+
+	if queryLower == "" {
+		return 1
+	}
+
+	matchCount := strings.Count(strings.ToLower(line), queryLower)
+	if matchCount <= 0 {
+		return 1
+	}
+	return float64(matchCount)
+}
+
+func collectSemanticSearchTextCandidates(
+	ctx context.Context,
+	embedder indexing.Embedder,
+	vectorBackend indexing.VectorBackend,
+	namespace string,
+	query string,
+	filePattern string,
+	contextLines int,
+	topK int,
+	sourceRoot string,
+) ([]searchTextMatchCandidate, error) {
+	if topK <= 0 {
+		return []searchTextMatchCandidate{}, nil
+	}
+
+	embeddings, err := embedder.Embed(ctx, []string{query})
+	if err != nil {
+		return nil, fmt.Errorf("semantic retrieval: embed query: %w", err)
+	}
+	if len(embeddings) != 1 {
+		return nil, fmt.Errorf("semantic retrieval: expected one query embedding, got %d", len(embeddings))
+	}
+
+	response, err := vectorBackend.Query(ctx, indexing.VectorQueryRequest{
+		Namespace: namespace,
+		Embedding: embeddings[0],
+		TopK:      topK,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("semantic retrieval: query vectors for %s: %w", namespace, err)
+	}
+
+	linesCache := map[string][]string{}
+	candidates := make([]searchTextMatchCandidate, 0, len(response.Matches))
+	for _, match := range response.Matches {
+		filePath := normalizeRepoFilePath(match.Record.Metadata.Path)
+		if filePath == "" {
+			continue
+		}
+		if !matchesSearchTextPattern(filePath, filePattern) {
+			continue
+		}
+
+		line := match.Record.Metadata.StartLine
+		if line <= 0 {
+			line = 1
+		}
+
+		text := firstSearchTextSnippet(match.Record.Metadata.ChunkText)
+		before, after := []string{}, []string{}
+		if lines, ok := loadSearchTextFileLines(sourceRoot, filePath, linesCache); ok {
+			if contextLines > 0 {
+				before, after = buildSearchTextContextFromLines(lines, line, contextLines)
+			}
+			if text == "" && line >= 1 && line <= len(lines) {
+				text = trimAndClampSearchTextLine(lines[line-1])
+			}
+		}
+
+		candidates = append(candidates, searchTextMatchCandidate{
+			File:          filePath,
+			Line:          line,
+			Text:          text,
+			Before:        before,
+			After:         after,
+			SemanticScore: match.Score,
+		})
+	}
+
+	return candidates, nil
+}
+
+func firstSearchTextSnippet(raw string) string {
+	lines := splitContentLines(raw)
+	for _, line := range lines {
+		trimmed := trimAndClampSearchTextLine(line)
+		if strings.TrimSpace(trimmed) != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func loadSearchTextFileLines(
+	sourceRoot string,
+	filePath string,
+	cache map[string][]string,
+) ([]string, bool) {
+	if sourceRoot == "" {
+		return nil, false
+	}
+
+	if cached, ok := cache[filePath]; ok {
+		return cached, true
+	}
+
+	absoluteFile := filepath.Clean(filepath.Join(sourceRoot, filepath.FromSlash(filePath)))
+	if !pathWithin(sourceRoot, absoluteFile) {
+		return nil, false
+	}
+
+	contentBytes, err := os.ReadFile(absoluteFile)
+	if err != nil {
+		return nil, false
+	}
+
+	lines := splitContentLines(string(contentBytes))
+	cache[filePath] = lines
+	return lines, true
+}
+
+func buildSearchTextContextFromLines(
+	lines []string,
+	line int,
+	contextLines int,
+) ([]string, []string) {
+	if contextLines <= 0 || len(lines) == 0 {
+		return []string{}, []string{}
+	}
+
+	actualLine := clampInt(line, 1, len(lines))
+	lineIndex := actualLine - 1
+
+	beforeStart := lineIndex - contextLines
+	if beforeStart < 0 {
+		beforeStart = 0
+	}
+	afterEnd := lineIndex + contextLines + 1
+	if afterEnd > len(lines) {
+		afterEnd = len(lines)
+	}
+
+	before := make([]string, 0, lineIndex-beforeStart)
+	for _, item := range lines[beforeStart:lineIndex] {
+		before = append(before, trimAndClampSearchTextLine(item))
+	}
+
+	after := make([]string, 0, afterEnd-lineIndex-1)
+	for _, item := range lines[lineIndex+1 : afterEnd] {
+		after = append(after, trimAndClampSearchTextLine(item))
+	}
+
+	return before, after
+}
+
+func (s *Service) resolveSearchTextHybridWeights(arguments map[string]any) (float64, float64) {
+	lexicalWeight := s.cfg.VectorLexicalWeight
+	semanticWeight := s.cfg.VectorSemanticWeight
+
+	if override, ok := optionalFloatArg(arguments, "lexical_weight"); ok && override >= 0 {
+		lexicalWeight = override
+	}
+	if override, ok := optionalFloatArg(arguments, "semantic_weight"); ok && override >= 0 {
+		semanticWeight = override
+	}
+
+	if lexicalWeight == 0 && semanticWeight == 0 {
+		lexicalWeight = 0.5
+		semanticWeight = 0.5
+	}
+
+	total := lexicalWeight + semanticWeight
+	if total <= 0 {
+		return 0.5, 0.5
+	}
+	return lexicalWeight / total, semanticWeight / total
+}
+
+func rankHybridSearchTextCandidates(
+	lexical []searchTextMatchCandidate,
+	semantic []searchTextMatchCandidate,
+	lexicalWeight float64,
+	semanticWeight float64,
+) []searchTextMatchCandidate {
+	merged := map[string]searchTextMatchCandidate{}
+	lexicalScores := map[string]float64{}
+	semanticScores := map[string]float64{}
+
+	for _, candidate := range lexical {
+		key := searchTextCandidateKey(candidate)
+		existing, ok := merged[key]
+		if !ok {
+			existing = candidate
+		}
+		if candidate.LexicalScore > lexicalScores[key] {
+			lexicalScores[key] = candidate.LexicalScore
+			existing.LexicalScore = candidate.LexicalScore
+		}
+		if existing.Text == "" {
+			existing.Text = candidate.Text
+		}
+		if len(existing.Before) == 0 && len(candidate.Before) > 0 {
+			existing.Before = append([]string(nil), candidate.Before...)
+		}
+		if len(existing.After) == 0 && len(candidate.After) > 0 {
+			existing.After = append([]string(nil), candidate.After...)
+		}
+		merged[key] = existing
+	}
+
+	for _, candidate := range semantic {
+		key := searchTextCandidateKey(candidate)
+		existing, ok := merged[key]
+		if !ok {
+			existing = candidate
+		}
+		if candidate.SemanticScore > semanticScores[key] {
+			semanticScores[key] = candidate.SemanticScore
+			existing.SemanticScore = candidate.SemanticScore
+		}
+		if existing.Text == "" {
+			existing.Text = candidate.Text
+		}
+		if len(existing.Before) == 0 && len(candidate.Before) > 0 {
+			existing.Before = append([]string(nil), candidate.Before...)
+		}
+		if len(existing.After) == 0 && len(candidate.After) > 0 {
+			existing.After = append([]string(nil), candidate.After...)
+		}
+		merged[key] = existing
+	}
+
+	normalizedLexical := normalizeSearchTextScores(lexicalScores)
+	normalizedSemantic := normalizeSearchTextScores(semanticScores)
+
+	out := make([]searchTextMatchCandidate, 0, len(merged))
+	for key, candidate := range merged {
+		candidate.LexicalScore = normalizedLexical[key]
+		candidate.SemanticScore = normalizedSemantic[key]
+		candidate.HybridScore = lexicalWeight*candidate.LexicalScore + semanticWeight*candidate.SemanticScore
+		out = append(out, candidate)
+	}
+
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].HybridScore != out[j].HybridScore {
+			return out[i].HybridScore > out[j].HybridScore
+		}
+		if lexicalWeight > 0 && out[i].LexicalScore != out[j].LexicalScore {
+			return out[i].LexicalScore > out[j].LexicalScore
+		}
+		if semanticWeight > 0 && out[i].SemanticScore != out[j].SemanticScore {
+			return out[i].SemanticScore > out[j].SemanticScore
+		}
+		if out[i].File != out[j].File {
+			return out[i].File < out[j].File
+		}
+		if out[i].Line != out[j].Line {
+			return out[i].Line < out[j].Line
+		}
+		return out[i].Text < out[j].Text
+	})
+
+	return out
+}
+
+func searchTextCandidateKey(candidate searchTextMatchCandidate) string {
+	return candidate.File + "\x00" + strconv.Itoa(candidate.Line)
+}
+
+func normalizeSearchTextScores(scores map[string]float64) map[string]float64 {
+	if len(scores) == 0 {
+		return map[string]float64{}
+	}
+
+	minScore := math.MaxFloat64
+	maxScore := -math.MaxFloat64
+	for _, score := range scores {
+		if score < minScore {
+			minScore = score
+		}
+		if score > maxScore {
+			maxScore = score
+		}
+	}
+
+	normalized := make(map[string]float64, len(scores))
+	if maxScore == minScore {
+		for key := range scores {
+			normalized[key] = 1
+		}
+		return normalized
+	}
+
+	denominator := maxScore - minScore
+	for key, score := range scores {
+		normalized[key] = (score - minScore) / denominator
+	}
+	return normalized
+}
+
+func buildSearchTextGroupedResults(
+	candidates []searchTextMatchCandidate,
+	contextLines int,
+	mode searchTextRetrievalMode,
+) []map[string]any {
+	results := make([]map[string]any, 0, len(candidates))
+	if len(candidates) == 0 {
+		return results
+	}
+
+	order := make([]string, 0, len(candidates))
+	grouped := map[string][]map[string]any{}
+	for _, candidate := range candidates {
+		if _, seen := grouped[candidate.File]; !seen {
+			order = append(order, candidate.File)
+		}
+
+		match := map[string]any{
+			"line": candidate.Line,
+			"text": candidate.Text,
+		}
+		if contextLines > 0 {
+			match["before"] = append([]string(nil), candidate.Before...)
+			match["after"] = append([]string(nil), candidate.After...)
+		}
+
+		switch mode {
+		case searchTextRetrievalModeSemantic:
+			match["score"] = candidate.SemanticScore
+		case searchTextRetrievalModeHybrid:
+			match["score"] = candidate.HybridScore
+			match["lexical_score"] = candidate.LexicalScore
+			match["vector_score"] = candidate.SemanticScore
+		}
+
+		grouped[candidate.File] = append(grouped[candidate.File], match)
+	}
+
+	for _, filePath := range order {
+		results = append(results, map[string]any{
+			"file":    filePath,
+			"matches": grouped[filePath],
+		})
+	}
+
+	return results
+}
+
 func buildFileTree(files []string, pathPrefix string, includeSummaries bool) []map[string]any {
 	root := map[string]any{}
 
@@ -4383,6 +4965,28 @@ func optionalIntArg(arguments map[string]any, key string) (int, bool) {
 		return int(typed), true
 	case float64:
 		return int(typed), true
+	default:
+		return 0, false
+	}
+}
+
+func optionalFloatArg(arguments map[string]any, key string) (float64, bool) {
+	value, ok := arguments[key]
+	if !ok || value == nil {
+		return 0, false
+	}
+
+	switch typed := value.(type) {
+	case float64:
+		return typed, true
+	case float32:
+		return float64(typed), true
+	case int:
+		return float64(typed), true
+	case int32:
+		return float64(typed), true
+	case int64:
+		return float64(typed), true
 	default:
 		return 0, false
 	}

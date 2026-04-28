@@ -33,6 +33,8 @@ const (
 	defaultRequestTimeoutMS     = 0
 	defaultVectorTopK           = 5
 	defaultVectorQueryTimeoutMS = 8000
+	defaultVectorLexicalWeight  = 0.5
+	defaultVectorSemanticWeight = 0.5
 	defaultFanoutItemTimeoutMS  = 0
 	defaultMaxFolderFiles       = 2000
 	defaultMaxIndexFiles        = 10000
@@ -66,6 +68,10 @@ type Config struct {
 	VectorTopK int
 	// VectorQueryTimeoutMS bounds vector query/embedding calls in milliseconds.
 	VectorQueryTimeoutMS int
+	// VectorLexicalWeight controls lexical score contribution in hybrid retrieval.
+	VectorLexicalWeight float64
+	// VectorSemanticWeight controls semantic/vector score contribution in hybrid retrieval.
+	VectorSemanticWeight float64
 	// EmbeddingProvider selects which embedding service implementation to use.
 	EmbeddingProvider string
 	// EmbeddingModel is the provider model identifier for embeddings.
@@ -157,6 +163,8 @@ func Load() (Config, error) {
 		VectorBackend:        defaultVectorBackend,
 		VectorTopK:           defaultVectorTopK,
 		VectorQueryTimeoutMS: defaultVectorQueryTimeoutMS,
+		VectorLexicalWeight:  defaultVectorLexicalWeight,
+		VectorSemanticWeight: defaultVectorSemanticWeight,
 		EmbeddingProvider:    defaultEmbeddingProvider,
 		EmbeddingModel:       defaultEmbeddingModel,
 		OllamaBaseURL:        defaultOllamaBaseURL,
@@ -446,6 +454,49 @@ func applyVectorEnvOverrides(cfg *Config) error {
 		} else {
 			cfg.VectorQueryTimeoutMS = value
 		}
+	}
+
+	if raw, ok := getenvTrimmed("VECTOR_LEXICAL_WEIGHT"); ok {
+		value, err := strconv.ParseFloat(raw, 64)
+		if err != nil || value < 0 {
+			validationErrors = append(
+				validationErrors,
+				fmt.Sprintf(
+					"VECTOR_LEXICAL_WEIGHT must be a non-negative number (got %q); set VECTOR_LEXICAL_WEIGHT=%g",
+					raw,
+					defaultVectorLexicalWeight,
+				),
+			)
+		} else {
+			cfg.VectorLexicalWeight = value
+		}
+	}
+
+	if raw, ok := getenvTrimmed("VECTOR_SEMANTIC_WEIGHT"); ok {
+		value, err := strconv.ParseFloat(raw, 64)
+		if err != nil || value < 0 {
+			validationErrors = append(
+				validationErrors,
+				fmt.Sprintf(
+					"VECTOR_SEMANTIC_WEIGHT must be a non-negative number (got %q); set VECTOR_SEMANTIC_WEIGHT=%g",
+					raw,
+					defaultVectorSemanticWeight,
+				),
+			)
+		} else {
+			cfg.VectorSemanticWeight = value
+		}
+	}
+
+	if cfg.VectorLexicalWeight == 0 && cfg.VectorSemanticWeight == 0 {
+		validationErrors = append(
+			validationErrors,
+			fmt.Sprintf(
+				"VECTOR_LEXICAL_WEIGHT and VECTOR_SEMANTIC_WEIGHT cannot both be 0; set at least one positive (for example VECTOR_LEXICAL_WEIGHT=%g, VECTOR_SEMANTIC_WEIGHT=%g)",
+				defaultVectorLexicalWeight,
+				defaultVectorSemanticWeight,
+			),
+		)
 	}
 
 	if raw, ok := getenvTrimmed("EMBEDDING_PROVIDER"); ok {

@@ -97,6 +97,8 @@ func TestVectorConfigDefaults(t *testing.T) {
 	t.Setenv("VECTOR_BACKEND", "")
 	t.Setenv("VECTOR_TOP_K", "")
 	t.Setenv("VECTOR_QUERY_TIMEOUT_MS", "")
+	t.Setenv("VECTOR_LEXICAL_WEIGHT", "")
+	t.Setenv("VECTOR_SEMANTIC_WEIGHT", "")
 	t.Setenv("EMBEDDING_PROVIDER", "")
 	t.Setenv("EMBEDDING_MODEL", "")
 	t.Setenv("OLLAMA_BASE_URL", "")
@@ -117,6 +119,12 @@ func TestVectorConfigDefaults(t *testing.T) {
 			defaultVectorQueryTimeoutMS,
 			cfg.VectorQueryTimeoutMS,
 		)
+	}
+	if cfg.VectorLexicalWeight != defaultVectorLexicalWeight {
+		t.Fatalf("expected default vector lexical weight %g, got %g", defaultVectorLexicalWeight, cfg.VectorLexicalWeight)
+	}
+	if cfg.VectorSemanticWeight != defaultVectorSemanticWeight {
+		t.Fatalf("expected default vector semantic weight %g, got %g", defaultVectorSemanticWeight, cfg.VectorSemanticWeight)
 	}
 	if cfg.EmbeddingProvider != defaultEmbeddingProvider {
 		t.Fatalf(
@@ -139,6 +147,8 @@ func TestVectorConfigEnvOverrides(t *testing.T) {
 	t.Setenv("VECTOR_BACKEND", "SQLITE")
 	t.Setenv("VECTOR_TOP_K", "11")
 	t.Setenv("VECTOR_QUERY_TIMEOUT_MS", "1234")
+	t.Setenv("VECTOR_LEXICAL_WEIGHT", "0.25")
+	t.Setenv("VECTOR_SEMANTIC_WEIGHT", "0.75")
 	t.Setenv("EMBEDDING_PROVIDER", "OLLAMA")
 	t.Setenv("EMBEDDING_MODEL", "custom-bge")
 	t.Setenv("OLLAMA_BASE_URL", "http://localhost:11434")
@@ -155,6 +165,12 @@ func TestVectorConfigEnvOverrides(t *testing.T) {
 	}
 	if cfg.VectorQueryTimeoutMS != 1234 {
 		t.Fatalf("expected vector query timeout 1234, got %d", cfg.VectorQueryTimeoutMS)
+	}
+	if cfg.VectorLexicalWeight != 0.25 {
+		t.Fatalf("expected vector lexical weight 0.25, got %g", cfg.VectorLexicalWeight)
+	}
+	if cfg.VectorSemanticWeight != 0.75 {
+		t.Fatalf("expected vector semantic weight 0.75, got %g", cfg.VectorSemanticWeight)
 	}
 	if cfg.EmbeddingProvider != "ollama" {
 		t.Fatalf("expected embedding provider ollama, got %q", cfg.EmbeddingProvider)
@@ -294,12 +310,33 @@ func TestQdrantConfigValidationErrors(t *testing.T) {
 	}
 }
 
+func TestVectorHybridWeightValidationErrors(t *testing.T) {
+	isolateConfigPath(t)
+
+	t.Setenv("VECTOR_LEXICAL_WEIGHT", "0")
+	t.Setenv("VECTOR_SEMANTIC_WEIGHT", "0")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected validation error when both hybrid weights are zero")
+	}
+
+	message := err.Error()
+	for _, field := range []string{"VECTOR_LEXICAL_WEIGHT", "VECTOR_SEMANTIC_WEIGHT"} {
+		if !strings.Contains(message, field) {
+			t.Fatalf("expected validation message to mention %s: %q", field, message)
+		}
+	}
+}
+
 func TestLoadVectorEnvironmentValidationErrors(t *testing.T) {
 	isolateConfigPath(t)
 
 	t.Setenv("VECTOR_BACKEND", "redis")
 	t.Setenv("VECTOR_TOP_K", "0")
 	t.Setenv("VECTOR_QUERY_TIMEOUT_MS", "-2")
+	t.Setenv("VECTOR_LEXICAL_WEIGHT", "-1")
+	t.Setenv("VECTOR_SEMANTIC_WEIGHT", "bad")
 	t.Setenv("EMBEDDING_PROVIDER", "unknown")
 	t.Setenv("OLLAMA_BASE_URL", "localhost:11434")
 
@@ -313,6 +350,8 @@ func TestLoadVectorEnvironmentValidationErrors(t *testing.T) {
 		"VECTOR_BACKEND",
 		"VECTOR_TOP_K",
 		"VECTOR_QUERY_TIMEOUT_MS",
+		"VECTOR_LEXICAL_WEIGHT",
+		"VECTOR_SEMANTIC_WEIGHT",
 		"EMBEDDING_PROVIDER",
 		"OLLAMA_BASE_URL",
 	} {
