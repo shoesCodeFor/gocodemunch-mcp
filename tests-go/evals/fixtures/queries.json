@@ -1,0 +1,66 @@
+{
+  "dataset": "vector-agnostic-retrieval-fixtures-v1",
+  "description": "Deterministic eval queries that target the local fixture corpus.",
+  "queries": [
+    {
+      "id": "q01-go-json-body",
+      "query": "How can I decode a JSON request body into a Go struct and validate required fields?",
+      "top_k": 5
+    },
+    {
+      "id": "q02-go-http-timeout",
+      "query": "What is the Go pattern for outbound HTTP request timeouts with retry-safe errors?",
+      "top_k": 5
+    },
+    {
+      "id": "q03-go-context-cancel",
+      "query": "How should context cancellation propagate through goroutines in a Go service?",
+      "top_k": 5
+    },
+    {
+      "id": "q04-pandas-csv-clean",
+      "query": "How do I clean CSV columns and fill missing values with pandas before analytics?",
+      "top_k": 5
+    },
+    {
+      "id": "q05-fastapi-validate-payload",
+      "query": "How can FastAPI validate request payload schemas and return structured validation errors?",
+      "top_k": 5
+    },
+    {
+      "id": "q06-postgres-dashboard-index",
+      "query": "Which PostgreSQL index helps dashboard queries filtered by status and created_at?",
+      "top_k": 5
+    },
+    {
+      "id": "q07-sql-monthly-revenue",
+      "query": "How do I write SQL to aggregate monthly revenue and order by month?",
+      "top_k": 5
+    },
+    {
+      "id": "q08-react-filter-fetch",
+      "query": "How do I fetch data in React when filters change without stale useEffect behavior?",
+      "top_k": 5
+    },
+    {
+      "id": "q09-typescript-debounce-input",
+      "query": "How can I debounce a TypeScript search box to cut down API request spam?",
+      "top_k": 5
+    },
+    {
+      "id": "q10-docker-compose-redis",
+      "query": "How do I configure docker compose for web plus redis with health checks and restart policies?",
+      "top_k": 5
+    },
+    {
+      "id": "q11-k8s-probes",
+      "query": "What is the difference between Kubernetes readiness and liveness probes in deployment configs?",
+      "top_k": 5
+    },
+    {
+      "id": "q12-rust-serde-parse-json",
+      "query": "How do I parse JSON into Rust structs using serde derive and handle parse errors?",
+      "top_k": 5
+    }
+  ]
+}

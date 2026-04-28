@@ -1,0 +1,121 @@
+{
+  "dataset": "vector-agnostic-retrieval-fixtures-v1",
+  "description": "Graded relevance judgments (0-3) for eval queries against the local fixture corpus.",
+  "judgments": [
+    {
+      "query_id": "q01-go-json-body",
+      "doc_id": "doc-go-json-decode",
+      "relevance": 3
+    },
+    {
+      "query_id": "q01-go-json-body",
+      "doc_id": "doc-python-fastapi-validation",
+      "relevance": 1
+    },
+    {
+      "query_id": "q02-go-http-timeout",
+      "doc_id": "doc-go-http-timeout",
+      "relevance": 3
+    },
+    {
+      "query_id": "q02-go-http-timeout",
+      "doc_id": "doc-go-context-cancel",
+      "relevance": 2
+    },
+    {
+      "query_id": "q03-go-context-cancel",
+      "doc_id": "doc-go-context-cancel",
+      "relevance": 3
+    },
+    {
+      "query_id": "q03-go-context-cancel",
+      "doc_id": "doc-go-http-timeout",
+      "relevance": 2
+    },
+    {
+      "query_id": "q04-pandas-csv-clean",
+      "doc_id": "doc-python-csv-clean",
+      "relevance": 3
+    },
+    {
+      "query_id": "q04-pandas-csv-clean",
+      "doc_id": "doc-python-fastapi-validation",
+      "relevance": 1
+    },
+    {
+      "query_id": "q05-fastapi-validate-payload",
+      "doc_id": "doc-python-fastapi-validation",
+      "relevance": 3
+    },
+    {
+      "query_id": "q05-fastapi-validate-payload",
+      "doc_id": "doc-go-json-decode",
+      "relevance": 1
+    },
+    {
+      "query_id": "q06-postgres-dashboard-index",
+      "doc_id": "doc-postgres-index-dashboard",
+      "relevance": 3
+    },
+    {
+      "query_id": "q06-postgres-dashboard-index",
+      "doc_id": "doc-sql-revenue-aggregation",
+      "relevance": 1
+    },
+    {
+      "query_id": "q07-sql-monthly-revenue",
+      "doc_id": "doc-sql-revenue-aggregation",
+      "relevance": 3
+    },
+    {
+      "query_id": "q07-sql-monthly-revenue",
+      "doc_id": "doc-postgres-index-dashboard",
+      "relevance": 1
+    },
+    {
+      "query_id": "q08-react-filter-fetch",
+      "doc_id": "doc-react-useeffect-fetch",
+      "relevance": 3
+    },
+    {
+      "query_id": "q08-react-filter-fetch",
+      "doc_id": "doc-typescript-debounce-search",
+      "relevance": 2
+    },
+    {
+      "query_id": "q09-typescript-debounce-input",
+      "doc_id": "doc-typescript-debounce-search",
+      "relevance": 3
+    },
+    {
+      "query_id": "q09-typescript-debounce-input",
+      "doc_id": "doc-react-useeffect-fetch",
+      "relevance": 1
+    },
+    {
+      "query_id": "q10-docker-compose-redis",
+      "doc_id": "doc-docker-compose-redis",
+      "relevance": 3
+    },
+    {
+      "query_id": "q11-k8s-probes",
+      "doc_id": "doc-k8s-probes",
+      "relevance": 3
+    },
+    {
+      "query_id": "q11-k8s-probes",
+      "doc_id": "doc-docker-compose-redis",
+      "relevance": 1
+    },
+    {
+      "query_id": "q12-rust-serde-parse-json",
+      "doc_id": "doc-rust-serde-json",
+      "relevance": 3
+    },
+    {
+      "query_id": "q12-rust-serde-parse-json",
+      "doc_id": "doc-go-json-decode",
+      "relevance": 1
+    }
+  ]
+}

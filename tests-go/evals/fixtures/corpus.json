@@ -1,0 +1,78 @@
+{
+  "dataset": "vector-agnostic-retrieval-fixtures-v1",
+  "description": "Deterministic local eval corpus for semantic retrieval regression checks.",
+  "documents": [
+    {
+      "id": "doc-docker-compose-redis",
+      "path": "fixtures/infra/docker_compose_redis.yaml",
+      "language": "yaml",
+      "text": "Use Docker Compose to run web and redis services with restart policies, health checks, and shared network aliases."
+    },
+    {
+      "id": "doc-go-context-cancel",
+      "path": "fixtures/go/context_cancel.go",
+      "language": "go",
+      "text": "Propagate request-scoped context through service layers and stop goroutines early when context cancellation is signaled."
+    },
+    {
+      "id": "doc-go-http-timeout",
+      "path": "fixtures/go/http_timeout.go",
+      "language": "go",
+      "text": "Wrap outbound HTTP calls with context.WithTimeout, classify timeout errors, and allow safe retry logic."
+    },
+    {
+      "id": "doc-go-json-decode",
+      "path": "fixtures/go/json_decode.go",
+      "language": "go",
+      "text": "Decode JSON request bodies into typed Go structs with encoding/json and return validation errors for missing required fields."
+    },
+    {
+      "id": "doc-k8s-probes",
+      "path": "fixtures/k8s/probes.yaml",
+      "language": "yaml",
+      "text": "Configure Kubernetes liveness and readiness probes so unhealthy pods restart quickly and rollout safety is preserved."
+    },
+    {
+      "id": "doc-postgres-index-dashboard",
+      "path": "fixtures/sql/postgres_dashboard_index.sql",
+      "language": "sql",
+      "text": "Create a PostgreSQL multicolumn btree index on status and created_at to speed up filtered dashboard queries."
+    },
+    {
+      "id": "doc-python-csv-clean",
+      "path": "fixtures/python/csv_clean.py",
+      "language": "python",
+      "text": "Load CSV data with pandas, normalize column names, and fill missing values before downstream analytics jobs."
+    },
+    {
+      "id": "doc-python-fastapi-validation",
+      "path": "fixtures/python/fastapi_validation.py",
+      "language": "python",
+      "text": "Use FastAPI with Pydantic models to validate request payloads and return structured 422 responses for invalid input."
+    },
+    {
+      "id": "doc-react-useeffect-fetch",
+      "path": "fixtures/web/react_useeffect_fetch.tsx",
+      "language": "typescript",
+      "text": "Use React useEffect dependency arrays to fetch API results when filter inputs change and avoid stale state updates."
+    },
+    {
+      "id": "doc-rust-serde-json",
+      "path": "fixtures/rust/serde_json_parse.rs",
+      "language": "rust",
+      "text": "Parse JSON into Rust structs with serde derive annotations and map parse failures into explicit error variants."
+    },
+    {
+      "id": "doc-sql-revenue-aggregation",
+      "path": "fixtures/sql/monthly_revenue.sql",
+      "language": "sql",
+      "text": "Aggregate monthly revenue with SQL date truncation and grouped sums, then order results by month for reporting."
+    },
+    {
+      "id": "doc-typescript-debounce-search",
+      "path": "fixtures/web/debounce_search.ts",
+      "language": "typescript",
+      "text": "Debounce search input handlers in TypeScript to reduce request volume and prevent excessive API calls while typing."
+    }
+  ]
+}
