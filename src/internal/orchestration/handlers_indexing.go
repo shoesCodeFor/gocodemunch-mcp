@@ -1929,7 +1929,19 @@ func (s *Service) handleIndexFile(ctx context.Context, arguments map[string]any)
 			changes.New,
 			nil,
 		); err != nil {
-			_ = err // Single-file indexing remains successful even when vector ingestion is unavailable.
+			// Single-file indexing remains successful even when vector ingestion is unavailable.
+			s.logVectorOperation(
+				"vector_operation_failure",
+				"sync_inline_index_vectors",
+				bestMatch.Repo,
+				1,
+				1,
+				false,
+				err,
+				map[string]any{
+					"file_path": relPath,
+				},
+			)
 		} else if err := store.IncrementalSave(ctx, bestMatch.Repo, index, storage.ChangeSet{}); err != nil {
 			return nil, err
 		}
@@ -2543,8 +2555,24 @@ func (s *Service) upsertIndexedVectorFilesWithChunkIDs(
 		texts = append(texts, chunk.ChunkText)
 	}
 
-	embeddings, err := embedder.Embed(ctx, texts)
-	if err != nil {
+	var embeddings [][]float32
+	if err := s.runVectorOperationWithRetry(
+		ctx,
+		"embed_index_chunks",
+		namespace,
+		map[string]any{
+			"chunk_count": len(chunks),
+			"input_count": len(texts),
+		},
+		func(opCtx context.Context) error {
+			result, embedErr := embedder.Embed(opCtx, texts)
+			if embedErr != nil {
+				return embedErr
+			}
+			embeddings = result
+			return nil
+		},
+	); err != nil {
 		return nil, fmt.Errorf("embed indexed chunks for %s: %w", namespace, err)
 	}
 	if len(embeddings) != len(chunks) {
@@ -2564,11 +2592,28 @@ func (s *Service) upsertIndexedVectorFilesWithChunkIDs(
 		return map[string][]string{}, nil
 	}
 
-	if _, err := vectorBackend.Upsert(ctx, indexing.VectorUpsertRequest{
-		Namespace: namespace,
-		Records:   records,
-	}); err != nil {
-		return nil, fmt.Errorf("upsert chunk vectors for %s: %w", namespace, err)
+	batches := splitVectorRecordBatches(records, s.vectorUpsertBatchSize())
+	for batchIndex, batchRecords := range batches {
+		request := indexing.VectorUpsertRequest{
+			Namespace: namespace,
+			Records:   batchRecords,
+		}
+		if err := s.runVectorOperationWithRetry(
+			ctx,
+			"upsert_chunk_vectors",
+			namespace,
+			map[string]any{
+				"batch_index":  batchIndex + 1,
+				"batch_count":  len(batches),
+				"record_count": len(batchRecords),
+			},
+			func(opCtx context.Context) error {
+				_, upsertErr := vectorBackend.Upsert(opCtx, request)
+				return upsertErr
+			},
+		); err != nil {
+			return nil, fmt.Errorf("upsert chunk vectors for %s: %w", namespace, err)
+		}
 	}
 
 	return chunkIDsByPath, nil
@@ -2717,11 +2762,28 @@ func (s *Service) deleteVectorRecordIDs(
 		return nil
 	}
 
-	if _, err := vectorBackend.Delete(ctx, indexing.VectorDeleteRequest{
-		Namespace: namespace,
-		IDs:       recordIDs,
-	}); err != nil {
-		return fmt.Errorf("delete chunk vectors for %s: %w", namespace, err)
+	batches := splitVectorIDBatches(recordIDs, s.vectorDeleteBatchSize())
+	for batchIndex, batchIDs := range batches {
+		request := indexing.VectorDeleteRequest{
+			Namespace: namespace,
+			IDs:       batchIDs,
+		}
+		if err := s.runVectorOperationWithRetry(
+			ctx,
+			"delete_chunk_vectors",
+			namespace,
+			map[string]any{
+				"batch_index": batchIndex + 1,
+				"batch_count": len(batches),
+				"id_count":    len(batchIDs),
+			},
+			func(opCtx context.Context) error {
+				_, deleteErr := vectorBackend.Delete(opCtx, request)
+				return deleteErr
+			},
+		); err != nil {
+			return fmt.Errorf("delete chunk vectors for %s: %w", namespace, err)
+		}
 	}
 	return nil
 }
@@ -2737,9 +2799,19 @@ func (s *Service) deleteVectorNamespace(ctx context.Context, namespace string) e
 		return nil
 	}
 
-	if _, err := vectorBackend.DeleteNamespace(ctx, indexing.VectorDeleteNamespaceRequest{
+	request := indexing.VectorDeleteNamespaceRequest{
 		Namespace: namespace,
-	}); err != nil {
+	}
+	if err := s.runVectorOperationWithRetry(
+		ctx,
+		"delete_vector_namespace",
+		namespace,
+		nil,
+		func(opCtx context.Context) error {
+			_, deleteErr := vectorBackend.DeleteNamespace(opCtx, request)
+			return deleteErr
+		},
+	); err != nil {
 		return fmt.Errorf("delete vector namespace for %s: %w", namespace, err)
 	}
 	return nil

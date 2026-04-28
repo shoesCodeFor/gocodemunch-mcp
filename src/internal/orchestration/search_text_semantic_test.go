@@ -35,6 +35,7 @@ type searchTextVectorBackendStub struct {
 	queryRequests []indexing.VectorQueryRequest
 	queryResponse indexing.VectorQueryResponse
 	queryErr      error
+	queryErrs     []error
 }
 
 func (s *searchTextVectorBackendStub) Upsert(
@@ -49,6 +50,13 @@ func (s *searchTextVectorBackendStub) Query(
 	request indexing.VectorQueryRequest,
 ) (indexing.VectorQueryResponse, error) {
 	s.queryRequests = append(s.queryRequests, request)
+	if len(s.queryErrs) > 0 {
+		err := s.queryErrs[0]
+		s.queryErrs = s.queryErrs[1:]
+		if err != nil {
+			return indexing.VectorQueryResponse{}, err
+		}
+	}
 	if s.queryErr != nil {
 		return indexing.VectorQueryResponse{}, s.queryErr
 	}
@@ -298,6 +306,95 @@ func TestSearchTextRejectsUnknownRetrievalMode(t *testing.T) {
 	if _, ok := payload["error"]; !ok {
 		t.Fatalf("expected retrieval_mode validation error, got %#v", payload)
 	}
+}
+
+func TestSearchTextSemanticFallsBackToLexicalOnVectorFailure(t *testing.T) {
+	store := mustIndexStore(t)
+	sourceRoot := t.TempDir()
+	writeSearchTextFixture(t, sourceRoot, "main.py", "def main():\n    # TODO fallback\n    return 1\n")
+
+	repoID := "local/retrieval-fallback"
+	saveSearchTextIndex(t, store, repoID, sourceRoot, map[string]string{
+		"main.py": "hash-main",
+	})
+
+	embedder := &searchTextEmbedderStub{
+		embeddings: [][]float32{{0.7, 0.3}},
+	}
+	vectorBackend := &searchTextVectorBackendStub{
+		queryErrs: []error{
+			retryableSearchTextError{message: "temporary vector timeout", retryable: true},
+			retryableSearchTextError{message: "temporary vector timeout", retryable: true},
+			retryableSearchTextError{message: "temporary vector timeout", retryable: true},
+		},
+	}
+
+	service := New(config.Config{
+		ServerName:           "gocodemunch-mcp",
+		ServerVersion:        "test",
+		FreshnessMode:        "relaxed",
+		VectorTopK:           3,
+		VectorLexicalWeight:  0.5,
+		VectorSemanticWeight: 0.5,
+		Disabled:             map[string]struct{}{},
+	}, Dependencies{
+		IndexStore:    store,
+		Embedder:      embedder,
+		VectorBackend: vectorBackend,
+	})
+
+	payload := service.CallTool(context.Background(), "search_text", map[string]any{
+		"repo":           repoID,
+		"query":          "TODO",
+		"retrieval_mode": "semantic",
+		"max_results":    5,
+	})
+	if errValue, hasErr := payload["error"]; hasErr {
+		t.Fatalf("expected degraded lexical success, got error: %#v", errValue)
+	}
+	if len(vectorBackend.queryRequests) != defaultVectorOperationMaxAttempts {
+		t.Fatalf(
+			"expected %d vector query attempts before fallback, got %d",
+			defaultVectorOperationMaxAttempts,
+			len(vectorBackend.queryRequests),
+		)
+	}
+
+	if got := payload["result_count"]; got != 1 {
+		t.Fatalf("expected lexical fallback result_count=1, got %#v", payload)
+	}
+	results := payload["results"].([]map[string]any)
+	if got := results[0]["file"]; got != "main.py" {
+		t.Fatalf("expected lexical fallback to return main.py, got %#v", got)
+	}
+
+	meta := payload["_meta"].(map[string]any)
+	if got := meta["retrieval_mode"]; got != "semantic" {
+		t.Fatalf("expected retrieval_mode to preserve requested mode, got %#v", meta)
+	}
+	if got := meta["effective_retrieval_mode"]; got != "lexical" {
+		t.Fatalf("expected effective_retrieval_mode lexical, got %#v", meta)
+	}
+	if got, _ := meta["degraded"].(bool); !got {
+		t.Fatalf("expected degraded=true in meta, got %#v", meta)
+	}
+	reason, _ := meta["degrade_reason"].(string)
+	if reason == "" {
+		t.Fatalf("expected degrade_reason in meta, got %#v", meta)
+	}
+}
+
+type retryableSearchTextError struct {
+	message   string
+	retryable bool
+}
+
+func (e retryableSearchTextError) Error() string {
+	return e.message
+}
+
+func (e retryableSearchTextError) Retryable() bool {
+	return e.retryable
 }
 
 func writeSearchTextFixture(t *testing.T, sourceRoot, relativePath, content string) {

@@ -37,6 +37,9 @@ type vectorBackendSpy struct {
 	upserts          []indexing.VectorUpsertRequest
 	deletes          []indexing.VectorDeleteRequest
 	deleteNamespaces []indexing.VectorDeleteNamespaceRequest
+	upsertErrs       []error
+	deleteErrs       []error
+	deleteNSErrs     []error
 }
 
 func (v *vectorBackendSpy) Upsert(
@@ -44,6 +47,9 @@ func (v *vectorBackendSpy) Upsert(
 	request indexing.VectorUpsertRequest,
 ) (indexing.VectorUpsertResponse, error) {
 	v.upserts = append(v.upserts, cloneUpsertRequest(request))
+	if err := popVectorBackendErr(&v.upsertErrs); err != nil {
+		return indexing.VectorUpsertResponse{}, err
+	}
 	return indexing.VectorUpsertResponse{Upserted: len(request.Records)}, nil
 }
 
@@ -59,6 +65,9 @@ func (v *vectorBackendSpy) Delete(
 	request indexing.VectorDeleteRequest,
 ) (indexing.VectorDeleteResponse, error) {
 	v.deletes = append(v.deletes, cloneDeleteRequest(request))
+	if err := popVectorBackendErr(&v.deleteErrs); err != nil {
+		return indexing.VectorDeleteResponse{}, err
+	}
 	return indexing.VectorDeleteResponse{Deleted: len(request.IDs)}, nil
 }
 
@@ -67,6 +76,9 @@ func (v *vectorBackendSpy) DeleteNamespace(
 	request indexing.VectorDeleteNamespaceRequest,
 ) (indexing.VectorDeleteNamespaceResponse, error) {
 	v.deleteNamespaces = append(v.deleteNamespaces, request)
+	if err := popVectorBackendErr(&v.deleteNSErrs); err != nil {
+		return indexing.VectorDeleteNamespaceResponse{}, err
+	}
 	return indexing.VectorDeleteNamespaceResponse{}, nil
 }
 
@@ -78,6 +90,18 @@ func (v *vectorBackendSpy) reset() {
 	v.upserts = nil
 	v.deletes = nil
 	v.deleteNamespaces = nil
+	v.upsertErrs = nil
+	v.deleteErrs = nil
+	v.deleteNSErrs = nil
+}
+
+func popVectorBackendErr(queue *[]error) error {
+	if queue == nil || len(*queue) == 0 {
+		return nil
+	}
+	err := (*queue)[0]
+	*queue = (*queue)[1:]
+	return err
 }
 
 func cloneUpsertRequest(request indexing.VectorUpsertRequest) indexing.VectorUpsertRequest {
@@ -476,6 +500,107 @@ func TestInvalidateCacheDeletesVectorNamespace(t *testing.T) {
 	if got := vectorBackend.deleteNamespaces[0].Namespace; got != repoID {
 		t.Fatalf("expected namespace delete for %q, got %#v", repoID, vectorBackend.deleteNamespaces[0])
 	}
+}
+
+func TestIndexFolderVectorUpsertRetriesRetryableFailure(t *testing.T) {
+	store := mustIndexStore(t)
+	embedder := &embedderSpy{}
+	vectorBackend := &vectorBackendSpy{
+		upsertErrs: []error{
+			retryableVectorTestError{message: "temporary upsert failure", retryable: true},
+		},
+	}
+
+	service := New(config.Config{
+		ServerName:    "gocodemunch-mcp",
+		ServerVersion: "test",
+		FreshnessMode: "relaxed",
+		Disabled:      map[string]struct{}{},
+	}, Dependencies{
+		IndexStore:    store,
+		Embedder:      embedder,
+		VectorBackend: vectorBackend,
+	})
+
+	repoRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoRoot, "main.py"), []byte("def main():\n    return 1\n"), 0o644); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+
+	payload := service.CallTool(context.Background(), "index_folder", map[string]any{
+		"path":        repoRoot,
+		"incremental": false,
+	})
+	if success, _ := payload["success"].(bool); !success {
+		t.Fatalf("expected index_folder success after retryable vector failure, got %#v", payload)
+	}
+	if len(vectorBackend.upserts) != 2 {
+		t.Fatalf("expected retried vector upsert calls (2), got %d", len(vectorBackend.upserts))
+	}
+	if _, hasWarnings := payload["warnings"]; hasWarnings {
+		t.Fatalf("did not expect warnings when retry recovered, got %#v", payload["warnings"])
+	}
+}
+
+func TestIndexFolderVectorUpsertBatchesAreBounded(t *testing.T) {
+	store := mustIndexStore(t)
+	embedder := &embedderSpy{}
+	vectorBackend := &vectorBackendSpy{}
+
+	service := New(config.Config{
+		ServerName:    "gocodemunch-mcp",
+		ServerVersion: "test",
+		FreshnessMode: "relaxed",
+		Disabled:      map[string]struct{}{},
+	}, Dependencies{
+		IndexStore:    store,
+		Embedder:      embedder,
+		VectorBackend: vectorBackend,
+	})
+
+	repoRoot := t.TempDir()
+	lines := make([]string, 0, 11200)
+	for i := 0; i < 11200; i++ {
+		lines = append(lines, "value = 1")
+	}
+	content := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(repoRoot, "main.py"), []byte(content), 0o644); err != nil {
+		t.Fatalf("seed large file: %v", err)
+	}
+
+	payload := service.CallTool(context.Background(), "index_folder", map[string]any{
+		"path":        repoRoot,
+		"incremental": false,
+	})
+	if success, _ := payload["success"].(bool); !success {
+		t.Fatalf("expected index_folder success for large file, got %#v", payload)
+	}
+	if len(vectorBackend.upserts) < 2 {
+		t.Fatalf("expected multiple upsert batches for large file, got %d", len(vectorBackend.upserts))
+	}
+	for i, request := range vectorBackend.upserts {
+		if got := len(request.Records); got > defaultVectorUpsertBatchSize {
+			t.Fatalf(
+				"expected batch %d to have at most %d records, got %d",
+				i+1,
+				defaultVectorUpsertBatchSize,
+				got,
+			)
+		}
+	}
+}
+
+type retryableVectorTestError struct {
+	message   string
+	retryable bool
+}
+
+func (e retryableVectorTestError) Error() string {
+	return e.message
+}
+
+func (e retryableVectorTestError) Retryable() bool {
+	return e.retryable
 }
 
 func upsertRequestPaths(request indexing.VectorUpsertRequest) []string {

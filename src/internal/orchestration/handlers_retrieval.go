@@ -1312,105 +1312,52 @@ func (s *Service) handleSearchText(ctx context.Context, arguments map[string]any
 
 	sourceRoot := filepath.Clean(strings.TrimSpace(index.SourceRoot))
 	if mode == searchTextRetrievalModeLexical {
-		results := make([]map[string]any, 0, len(filteredFiles))
-		resultCount := 0
-		filesSearched := 0
-		truncated := false
-		for _, filePath := range filteredFiles {
-			if sourceRoot == "" {
-				continue
-			}
-
-			absoluteFile := filepath.Clean(filepath.Join(sourceRoot, filepath.FromSlash(filePath)))
-			if !pathWithin(sourceRoot, absoluteFile) {
-				continue
-			}
-
-			contentBytes, readErr := os.ReadFile(absoluteFile)
-			if readErr != nil {
-				continue
-			}
-			lines := splitContentLines(string(contentBytes))
-			filesSearched++
-
-			fileMatches := make([]map[string]any, 0, 4)
-			for lineIndex, line := range lines {
-				matched := false
-				if pattern != nil {
-					matched = pattern.MatchString(line)
-				} else {
-					matched = strings.Contains(strings.ToLower(line), queryLower)
-				}
-				if !matched {
-					continue
-				}
-
-				match := map[string]any{
-					"line": lineIndex + 1,
-					"text": trimAndClampSearchTextLine(line),
-				}
-				if contextLines > 0 {
-					beforeStart := lineIndex - contextLines
-					if beforeStart < 0 {
-						beforeStart = 0
-					}
-					afterEnd := lineIndex + contextLines + 1
-					if afterEnd > len(lines) {
-						afterEnd = len(lines)
-					}
-
-					before := make([]string, 0, lineIndex-beforeStart)
-					for _, item := range lines[beforeStart:lineIndex] {
-						before = append(before, trimAndClampSearchTextLine(item))
-					}
-
-					after := make([]string, 0, afterEnd-lineIndex-1)
-					for _, item := range lines[lineIndex+1 : afterEnd] {
-						after = append(after, trimAndClampSearchTextLine(item))
-					}
-
-					match["before"] = before
-					match["after"] = after
-				}
-
-				fileMatches = append(fileMatches, match)
-				resultCount++
-				if resultCount >= maxResults {
-					truncated = true
-					break
-				}
-			}
-
-			if len(fileMatches) > 0 {
-				results = append(results, map[string]any{
-					"file":    filePath,
-					"matches": fileMatches,
-				})
-			}
-			if truncated {
-				break
-			}
-		}
-
-		return map[string]any{
-			"result_count": resultCount,
-			"results":      results,
-			"_meta": map[string]any{
-				"timing_ms":          roundMilliseconds(time.Since(started)),
-				"files_searched":     filesSearched,
-				"truncated":          truncated,
-				"tokens_saved":       0,
-				"total_tokens_saved": 0,
-			},
-		}, nil
+		return buildSearchTextLexicalResponse(
+			filteredFiles,
+			sourceRoot,
+			queryLower,
+			pattern,
+			contextLines,
+			maxResults,
+			started,
+			nil,
+		), nil
 	}
 
 	embedder := s.deps.Embedder
 	vectorBackend := s.deps.VectorBackend
 	if embedder == nil || vectorBackend == nil {
-		return map[string]any{
-			"error": "Semantic retrieval unavailable: embedding/vector dependencies are not configured.",
-		}, nil
+		missingDepsErr := errors.New(
+			"semantic retrieval unavailable: embedding/vector dependencies are not configured",
+		)
+		s.logVectorOperation(
+			"semantic_retrieval_degraded",
+			"search_text_semantic_candidates",
+			repoID,
+			1,
+			1,
+			false,
+			missingDepsErr,
+			map[string]any{
+				"retrieval_mode": string(mode),
+				"query_length":   len(query),
+			},
+		)
+		return buildSearchTextLexicalResponse(
+			filteredFiles,
+			sourceRoot,
+			queryLower,
+			pattern,
+			contextLines,
+			maxResults,
+			started,
+			map[string]any{
+				"retrieval_mode":           string(mode),
+				"effective_retrieval_mode": string(searchTextRetrievalModeLexical),
+				"degraded":                 true,
+				"degrade_reason":           missingDepsErr.Error(),
+			},
+		), nil
 	}
 
 	semanticTopK := s.cfg.VectorTopK
@@ -1427,10 +1374,8 @@ func (s *Service) handleSearchText(ctx context.Context, arguments map[string]any
 		}
 	}
 
-	semanticCandidates, semanticErr := collectSemanticSearchTextCandidates(
+	semanticCandidates, semanticErr := s.collectSemanticSearchTextCandidates(
 		ctx,
-		embedder,
-		vectorBackend,
 		repoID,
 		query,
 		filePattern,
@@ -1439,7 +1384,34 @@ func (s *Service) handleSearchText(ctx context.Context, arguments map[string]any
 		sourceRoot,
 	)
 	if semanticErr != nil {
-		return nil, semanticErr
+		s.logVectorOperation(
+			"semantic_retrieval_degraded",
+			"search_text_semantic_candidates",
+			repoID,
+			1,
+			1,
+			false,
+			semanticErr,
+			map[string]any{
+				"retrieval_mode": string(mode),
+				"query_length":   len(query),
+			},
+		)
+		return buildSearchTextLexicalResponse(
+			filteredFiles,
+			sourceRoot,
+			queryLower,
+			pattern,
+			contextLines,
+			maxResults,
+			started,
+			map[string]any{
+				"retrieval_mode":           string(mode),
+				"effective_retrieval_mode": string(searchTextRetrievalModeLexical),
+				"degraded":                 true,
+				"degrade_reason":           semanticErr.Error(),
+			},
+		), nil
 	}
 
 	filesSearched := len(filteredFiles)
@@ -4242,6 +4214,42 @@ func collectLexicalSearchTextCandidates(
 	return candidates, filesSearched, truncated
 }
 
+func buildSearchTextLexicalResponse(
+	filteredFiles []string,
+	sourceRoot string,
+	queryLower string,
+	pattern *regexp.Regexp,
+	contextLines int,
+	maxResults int,
+	started time.Time,
+	metaOverrides map[string]any,
+) map[string]any {
+	candidates, filesSearched, truncated := collectLexicalSearchTextCandidates(
+		filteredFiles,
+		sourceRoot,
+		queryLower,
+		pattern,
+		contextLines,
+		maxResults,
+	)
+	meta := map[string]any{
+		"timing_ms":          roundMilliseconds(time.Since(started)),
+		"files_searched":     filesSearched,
+		"truncated":          truncated,
+		"tokens_saved":       0,
+		"total_tokens_saved": 0,
+	}
+	for key, value := range metaOverrides {
+		meta[key] = value
+	}
+
+	return map[string]any{
+		"result_count": len(candidates),
+		"results":      buildSearchTextGroupedResults(candidates, contextLines, searchTextRetrievalModeLexical),
+		"_meta":        meta,
+	}
+}
+
 func lexicalSearchTextScore(line, queryLower string, pattern *regexp.Regexp) float64 {
 	if pattern != nil {
 		matchCount := len(pattern.FindAllStringIndex(line, -1))
@@ -4262,10 +4270,8 @@ func lexicalSearchTextScore(line, queryLower string, pattern *regexp.Regexp) flo
 	return float64(matchCount)
 }
 
-func collectSemanticSearchTextCandidates(
+func (s *Service) collectSemanticSearchTextCandidates(
 	ctx context.Context,
-	embedder indexing.Embedder,
-	vectorBackend indexing.VectorBackend,
 	namespace string,
 	query string,
 	filePattern string,
@@ -4277,20 +4283,59 @@ func collectSemanticSearchTextCandidates(
 		return []searchTextMatchCandidate{}, nil
 	}
 
-	embeddings, err := embedder.Embed(ctx, []string{query})
-	if err != nil {
+	embedder := s.deps.Embedder
+	vectorBackend := s.deps.VectorBackend
+	if embedder == nil || vectorBackend == nil {
+		return nil, errors.New("semantic retrieval dependencies are not configured")
+	}
+
+	var embeddings [][]float32
+	if err := s.runVectorOperationWithRetry(
+		ctx,
+		"semantic_embed_query",
+		namespace,
+		map[string]any{
+			"query_length": len(query),
+			"input_count":  1,
+		},
+		func(opCtx context.Context) error {
+			result, embedErr := embedder.Embed(opCtx, []string{query})
+			if embedErr != nil {
+				return embedErr
+			}
+			embeddings = result
+			return nil
+		},
+	); err != nil {
 		return nil, fmt.Errorf("semantic retrieval: embed query: %w", err)
 	}
 	if len(embeddings) != 1 {
 		return nil, fmt.Errorf("semantic retrieval: expected one query embedding, got %d", len(embeddings))
 	}
 
-	response, err := vectorBackend.Query(ctx, indexing.VectorQueryRequest{
+	request := indexing.VectorQueryRequest{
 		Namespace: namespace,
 		Embedding: embeddings[0],
 		TopK:      topK,
-	})
-	if err != nil {
+	}
+	response := indexing.VectorQueryResponse{}
+	if err := s.runVectorOperationWithRetry(
+		ctx,
+		"semantic_query_vectors",
+		namespace,
+		map[string]any{
+			"query_length": len(query),
+			"top_k":        topK,
+		},
+		func(opCtx context.Context) error {
+			result, queryErr := vectorBackend.Query(opCtx, request)
+			if queryErr != nil {
+				return queryErr
+			}
+			response = result
+			return nil
+		},
+	); err != nil {
 		return nil, fmt.Errorf("semantic retrieval: query vectors for %s: %w", namespace, err)
 	}
 
