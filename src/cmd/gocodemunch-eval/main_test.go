@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -588,6 +591,200 @@ func TestRunWithArgsRejectsInvalidThreshold(t *testing.T) {
 	}
 }
 
+func TestRunWithArgsIntegrationThresholdGateFailsOnLatency(t *testing.T) {
+	fixturesDir := writeEvalFixtures(t, fixtureCorpus{
+		Dataset: "eval-integration-latency",
+		Documents: []fixtureDocument{
+			{ID: "doc-a", Path: "fixtures/a.go", Language: "go", Text: "json decode"},
+			{ID: "doc-b", Path: "fixtures/b.go", Language: "go", Text: "context cancel"},
+		},
+	}, fixtureQueries{
+		Dataset: "eval-integration-latency",
+		Queries: []fixtureRow{
+			{ID: "q-1", Query: "decode json", TopK: 2},
+			{ID: "q-2", Query: "cancel context", TopK: 2},
+		},
+	}, fixtureRelevance{
+		Dataset: "eval-integration-latency",
+		Judgments: []fixtureJudgment{
+			{QueryID: "q-1", DocID: "doc-a", Relevance: 3},
+			{QueryID: "q-2", DocID: "doc-b", Relevance: 3},
+		},
+	})
+
+	ollamaServer := newOllamaEvalStubServer(t, 20*time.Millisecond)
+	defer ollamaServer.Close()
+
+	setEvalRunnerIntegrationEnv(t, ollamaServer.URL, t.TempDir())
+	restore := overrideEvalRunnerHooks(
+		config.Load,
+		newVectorBackend,
+		newEmbedder,
+		closeVectorBackend,
+		func() time.Time { return time.Now().UTC() },
+	)
+	defer restore()
+
+	args := []string{
+		"--fixtures-dir", fixturesDir,
+		"--max-p50-latency-ms", "1",
+		"--max-p95-latency-ms", "1",
+		"--skip-markdown-report",
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runWithArgs(args, &stdout, &stderr)
+	if code != evalGateFailureExitCode {
+		t.Fatalf("expected gate failure exit code %d, got %d stderr=%s", evalGateFailureExitCode, code, stderr.String())
+	}
+
+	report := evalRunReport{}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("decode report json: %v output=%s", err, stdout.String())
+	}
+	if report.GatePassed {
+		t.Fatalf("expected gate_passed=false when latency thresholds are missed, got %#v", report)
+	}
+	if len(report.GateFailures) == 0 {
+		t.Fatalf("expected latency gate failures, got %#v", report)
+	}
+
+	failedMetrics := map[string]struct{}{}
+	for _, failure := range report.GateFailures {
+		failedMetrics[failure.Check.Metric] = struct{}{}
+	}
+	if _, ok := failedMetrics["latency_metrics.p50_ms"]; !ok {
+		t.Fatalf("expected p50 latency failure, got %#v", report.GateFailures)
+	}
+	if _, ok := failedMetrics["latency_metrics.p95_ms"]; !ok {
+		t.Fatalf("expected p95 latency failure, got %#v", report.GateFailures)
+	}
+
+	if len(report.Combinations) != 1 {
+		t.Fatalf("expected one combination report, got %#v", report.Combinations)
+	}
+	if report.Combinations[0].Gate.Passed {
+		t.Fatalf("expected combination gate failure, got %#v", report.Combinations[0].Gate)
+	}
+	if !strings.Contains(stderr.String(), "eval gate failed") {
+		t.Fatalf("expected gate failure summary on stderr, got %s", stderr.String())
+	}
+}
+
+func TestRunWithArgsIntegrationReportOutputDeterminism(t *testing.T) {
+	fixturesDir := writeEvalFixtures(t, fixtureCorpus{
+		Dataset: "eval-report-determinism",
+		Documents: []fixtureDocument{
+			{ID: "doc-a", Path: "fixtures/a.go", Language: "go", Text: "json decode"},
+			{ID: "doc-b", Path: "fixtures/b.go", Language: "go", Text: "context cancel"},
+		},
+	}, fixtureQueries{
+		Dataset: "eval-report-determinism",
+		Queries: []fixtureRow{
+			{ID: "q-1", Query: "decode json", TopK: 2},
+			{ID: "q-2", Query: "cancel context", TopK: 2},
+		},
+	}, fixtureRelevance{
+		Dataset: "eval-report-determinism",
+		Judgments: []fixtureJudgment{
+			{QueryID: "q-1", DocID: "doc-a", Relevance: 3},
+			{QueryID: "q-2", DocID: "doc-b", Relevance: 3},
+		},
+	})
+
+	ollamaServer := newOllamaEvalStubServer(t, 0)
+	defer ollamaServer.Close()
+
+	setEvalRunnerIntegrationEnv(t, ollamaServer.URL, t.TempDir())
+	fixedNow := time.Date(2026, time.April, 28, 11, 22, 33, 0, time.UTC)
+	restore := overrideEvalRunnerHooks(
+		config.Load,
+		newVectorBackend,
+		newEmbedder,
+		closeVectorBackend,
+		func() time.Time { return fixedNow },
+	)
+	defer restore()
+
+	reportDir := filepath.Join(t.TempDir(), "docs", "evals", "runs")
+	outPath := filepath.Join(t.TempDir(), "outputs", "eval-report.json")
+	args := []string{
+		"--fixtures-dir", fixturesDir,
+		"--markdown-report-dir", reportDir,
+		"--out", outPath,
+	}
+
+	var stdoutRun1 bytes.Buffer
+	var stderrRun1 bytes.Buffer
+	codeRun1 := runWithArgs(args, &stdoutRun1, &stderrRun1)
+	if codeRun1 != 0 {
+		t.Fatalf("expected first eval run success, got code=%d stderr=%s", codeRun1, stderrRun1.String())
+	}
+
+	reportRun1 := evalRunReport{}
+	if err := json.Unmarshal(stdoutRun1.Bytes(), &reportRun1); err != nil {
+		t.Fatalf("decode first report json: %v output=%s", err, stdoutRun1.String())
+	}
+
+	reportFileName := "20260428-112233z-eval-report-determinism.md"
+	reportPath := filepath.Join(reportDir, reportFileName)
+	if _, err := os.Stat(reportPath); err != nil {
+		t.Fatalf("expected markdown report %q after first run: %v", reportPath, err)
+	}
+
+	indexPath := filepath.Join(filepath.Dir(reportDir), evalIndexFileName)
+	indexRun1, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatalf("read eval index after first run: %v", err)
+	}
+
+	var stdoutRun2 bytes.Buffer
+	var stderrRun2 bytes.Buffer
+	codeRun2 := runWithArgs(args, &stdoutRun2, &stderrRun2)
+	if codeRun2 != 0 {
+		t.Fatalf("expected second eval run success, got code=%d stderr=%s", codeRun2, stderrRun2.String())
+	}
+
+	reportRun2 := evalRunReport{}
+	if err := json.Unmarshal(stdoutRun2.Bytes(), &reportRun2); err != nil {
+		t.Fatalf("decode second report json: %v output=%s", err, stdoutRun2.String())
+	}
+
+	normalizedRun1 := normalizeEvalReportForDeterministicComparison(reportRun1)
+	normalizedRun2 := normalizeEvalReportForDeterministicComparison(reportRun2)
+	if !reflect.DeepEqual(normalizedRun1, normalizedRun2) {
+		t.Fatalf(
+			"expected deterministic report content across repeated runs\nrun1=%#v\nrun2=%#v",
+			normalizedRun1,
+			normalizedRun2,
+		)
+	}
+
+	entries, err := os.ReadDir(reportDir)
+	if err != nil {
+		t.Fatalf("read markdown report directory: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one deterministic markdown report file after repeated runs, got %d", len(entries))
+	}
+	if got := entries[0].Name(); got != reportFileName {
+		t.Fatalf("unexpected markdown report filename %q", got)
+	}
+
+	indexRun2, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatalf("read eval index after second run: %v", err)
+	}
+	if string(indexRun1) != string(indexRun2) {
+		t.Fatalf("expected stable eval index content across repeated runs\nrun1:\n%s\nrun2:\n%s", string(indexRun1), string(indexRun2))
+	}
+
+	runLink := "[[20260428-112233z-eval-report-determinism]]"
+	if strings.Count(string(indexRun2), runLink) != 1 {
+		t.Fatalf("expected eval index to contain deterministic run link exactly once, index:\n%s", string(indexRun2))
+	}
+}
+
 func writeEvalFixtures(
 	t *testing.T,
 	corpus fixtureCorpus,
@@ -601,6 +798,112 @@ func writeEvalFixtures(
 	writeJSONFile(t, filepath.Join(dir, "queries.json"), queries)
 	writeJSONFile(t, filepath.Join(dir, "relevance.json"), relevance)
 	return dir
+}
+
+func setEvalRunnerIntegrationEnv(t *testing.T, ollamaBaseURL string, storagePath string) {
+	t.Helper()
+
+	t.Setenv("CODE_INDEX_PATH", storagePath)
+	t.Setenv("VECTOR_BACKEND", "sqlite")
+	t.Setenv("VECTOR_TOP_K", "8")
+	t.Setenv("VECTOR_QUERY_TIMEOUT_MS", "5000")
+	t.Setenv("VECTOR_LEXICAL_WEIGHT", "0.5")
+	t.Setenv("VECTOR_SEMANTIC_WEIGHT", "0.5")
+	t.Setenv("EMBEDDING_PROVIDER", "ollama")
+	t.Setenv("EMBEDDING_MODEL", "stub-embed")
+	t.Setenv("OLLAMA_BASE_URL", strings.TrimSpace(ollamaBaseURL))
+	t.Setenv("VLLM_BASE_URL", "")
+	t.Setenv("VLLM_MODEL", "")
+	t.Setenv("VLLM_API_KEY", "")
+	t.Setenv("QDRANT_URL", "")
+	t.Setenv("QDRANT_COLLECTION", "")
+	t.Setenv("QDRANT_API_KEY", "")
+
+	for _, key := range []string{
+		envEvalMinMeanRecallAtKPrimary,
+		envEvalMinMeanRecallAtKCompat,
+		envEvalMinMeanMRRAtKPrimary,
+		envEvalMinMeanMRRAtKCompat,
+		envEvalMaxP50LatencyMSPrimary,
+		envEvalMaxP50LatencyMSCompat,
+		envEvalMaxP95LatencyMSPrimary,
+		envEvalMaxP95LatencyMSCompat,
+	} {
+		t.Setenv(key, "")
+	}
+}
+
+func newOllamaEvalStubServer(t *testing.T, delay time.Duration) *httptest.Server {
+	t.Helper()
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/embed" {
+			http.NotFound(w, r)
+			return
+		}
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+
+		var payload struct {
+			Model string   `json:"model"`
+			Input []string `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		embeddings := make([][]float32, len(payload.Input))
+		for index, input := range payload.Input {
+			embeddings[index] = evalFixtureEmbedding(input)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model":      strings.TrimSpace(payload.Model),
+			"embeddings": embeddings,
+		})
+	}))
+}
+
+func evalFixtureEmbedding(text string) []float32 {
+	normalized := strings.ToLower(strings.TrimSpace(text))
+	return []float32{
+		float32(1 + strings.Count(normalized, "json")),
+		float32(1 + strings.Count(normalized, "decode")),
+		float32(1 + strings.Count(normalized, "context")),
+		float32(1 + strings.Count(normalized, "cancel")),
+	}
+}
+
+func normalizeEvalReportForDeterministicComparison(report evalRunReport) evalRunReport {
+	normalized := report
+	normalized.GeneratedAtUTC = ""
+
+	combinations := make([]evalCombinationReport, 0, len(report.Combinations))
+	for _, combo := range report.Combinations {
+		comboCopy := combo
+		comboCopy.Aggregate.LatencyMetrics.P50MS = 0
+		comboCopy.Aggregate.LatencyMetrics.P95MS = 0
+
+		perQuery := make([]evalPerQueryReport, 0, len(combo.PerQuery))
+		for _, row := range combo.PerQuery {
+			rowCopy := row
+			rowCopy.LatencyMS = 0
+			perQuery = append(perQuery, rowCopy)
+		}
+		comboCopy.PerQuery = perQuery
+		combinations = append(combinations, comboCopy)
+	}
+	normalized.Combinations = combinations
+
+	for index := range normalized.GateFailures {
+		if strings.HasPrefix(normalized.GateFailures[index].Check.Metric, "latency_metrics.") {
+			normalized.GateFailures[index].Check.Actual = 0
+		}
+	}
+	return normalized
 }
 
 func writeJSONFile(t *testing.T, path string, value any) {

@@ -27,5 +27,9 @@ Goal: add a repeatable, non-interactive evaluation harness with quality/performa
 - [x] Add `make eval-smoke`, `make eval-matrix`, and `make eval-gate` targets in `Makefile` with documented defaults and non-interactive behavior.
   - Completed: Added `eval-smoke`, `eval-matrix`, and `eval-gate` to `Makefile` with configurable defaults (`EVAL_*` variables), deterministic JSON outputs under `Auto Run Docs/Working/evals/`, and explicit non-interactive behavior via `--skip-markdown-report`.
   - Completed: Updated `Makefile` help text and `README.md` target reference to document default provider/backend matrices, default gate thresholds, output paths, and common override variables.
-- [ ] Add eval runner integration tests for threshold failures and report output determinism, then run targeted eval tests.
+- [x] Add eval runner integration tests for threshold failures and report output determinism, then run targeted eval tests.
+  - Completed: Added `TestRunWithArgsIntegrationThresholdGateFailsOnLatency` in `src/cmd/gocodemunch-eval/main_test.go` using a real sqlite backend plus an HTTP Ollama embedding stub to validate non-zero gate failure behavior (`exit code 3`) and latency-threshold failure reporting (`latency_metrics.p50_ms`, `latency_metrics.p95_ms`).
+  - Completed: Added `TestRunWithArgsIntegrationReportOutputDeterminism` in `src/cmd/gocodemunch-eval/main_test.go` to run the eval runner twice with fixed UTC time and assert deterministic normalized JSON report content, deterministic markdown report filename reuse, and stable/deduplicated `docs/evals/Eval-Index.md` run links.
+  - Completed: Added integration test helpers in `src/cmd/gocodemunch-eval/main_test.go` (`setEvalRunnerIntegrationEnv`, `newOllamaEvalStubServer`, `evalFixtureEmbedding`, `normalizeEvalReportForDeterministicComparison`) to keep tests deterministic and non-interactive.
+  - Completed: Ran targeted eval suites with `go test ./src/internal/evals ./src/cmd/gocodemunch-eval -count=1`.
 - [ ] Run `make eval-smoke` and `make eval-matrix` twice, verify stable baselines, and persist initial thresholds in the repo.
