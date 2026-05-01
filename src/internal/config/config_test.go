@@ -91,6 +91,166 @@ func TestLoadFanoutInvalidOverloadPolicyFallsBackToReject(t *testing.T) {
 	}
 }
 
+func TestSavingsConfigDefaults(t *testing.T) {
+	isolateConfigPath(t)
+
+	t.Setenv("GOCODEMUNCH_SAVINGS_TELEMETRY_ENABLED", "")
+	t.Setenv("GOCODEMUNCH_SAVINGS_SNAPSHOT_INTERVAL_MS", "")
+	t.Setenv("GOCODEMUNCH_SAVINGS_CLAUDE_CODE_INPUT_USD_PER_MTOK", "")
+	t.Setenv("GOCODEMUNCH_SAVINGS_CLAUDE_CODE_OUTPUT_USD_PER_MTOK", "")
+	t.Setenv("GOCODEMUNCH_SAVINGS_CODEX_INPUT_USD_PER_MTOK", "")
+	t.Setenv("GOCODEMUNCH_SAVINGS_CODEX_OUTPUT_USD_PER_MTOK", "")
+	t.Setenv("GOCODEMUNCH_SAVINGS_AMP_INPUT_USD_PER_MTOK", "")
+	t.Setenv("GOCODEMUNCH_SAVINGS_AMP_OUTPUT_USD_PER_MTOK", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.SavingsTelemetryEnabled != defaultSavingsTelemetryEnabled {
+		t.Fatalf(
+			"expected default savings telemetry enabled=%t, got %t",
+			defaultSavingsTelemetryEnabled,
+			cfg.SavingsTelemetryEnabled,
+		)
+	}
+	if cfg.SavingsSnapshotIntervalMS != defaultSavingsSnapshotIntervalMS {
+		t.Fatalf(
+			"expected default savings snapshot interval %dms, got %dms",
+			defaultSavingsSnapshotIntervalMS,
+			cfg.SavingsSnapshotIntervalMS,
+		)
+	}
+
+	claudePricing, ok := cfg.SavingsCompetitorPricing[savingsCompetitorClaudeCode]
+	if !ok {
+		t.Fatalf("expected %q pricing defaults to be present", savingsCompetitorClaudeCode)
+	}
+	if claudePricing.InputUSDPerMTok != defaultSavingsClaudeCodeInputUSDPerMTok {
+		t.Fatalf(
+			"expected default %q input pricing %g, got %g",
+			savingsCompetitorClaudeCode,
+			defaultSavingsClaudeCodeInputUSDPerMTok,
+			claudePricing.InputUSDPerMTok,
+		)
+	}
+	if claudePricing.OutputUSDPerMTok != defaultSavingsClaudeCodeOutputUSDPerMTok {
+		t.Fatalf(
+			"expected default %q output pricing %g, got %g",
+			savingsCompetitorClaudeCode,
+			defaultSavingsClaudeCodeOutputUSDPerMTok,
+			claudePricing.OutputUSDPerMTok,
+		)
+	}
+
+	codexPricing, ok := cfg.SavingsCompetitorPricing[savingsCompetitorCodex]
+	if !ok {
+		t.Fatalf("expected %q pricing defaults to be present", savingsCompetitorCodex)
+	}
+	if codexPricing.InputUSDPerMTok != defaultSavingsCodexInputUSDPerMTok {
+		t.Fatalf(
+			"expected default %q input pricing %g, got %g",
+			savingsCompetitorCodex,
+			defaultSavingsCodexInputUSDPerMTok,
+			codexPricing.InputUSDPerMTok,
+		)
+	}
+	if codexPricing.OutputUSDPerMTok != defaultSavingsCodexOutputUSDPerMTok {
+		t.Fatalf(
+			"expected default %q output pricing %g, got %g",
+			savingsCompetitorCodex,
+			defaultSavingsCodexOutputUSDPerMTok,
+			codexPricing.OutputUSDPerMTok,
+		)
+	}
+
+	ampPricing, ok := cfg.SavingsCompetitorPricing[savingsCompetitorAmp]
+	if !ok {
+		t.Fatalf("expected %q pricing defaults to be present", savingsCompetitorAmp)
+	}
+	if ampPricing.InputUSDPerMTok != defaultSavingsAmpInputUSDPerMTok {
+		t.Fatalf(
+			"expected default %q input pricing %g, got %g",
+			savingsCompetitorAmp,
+			defaultSavingsAmpInputUSDPerMTok,
+			ampPricing.InputUSDPerMTok,
+		)
+	}
+	if ampPricing.OutputUSDPerMTok != defaultSavingsAmpOutputUSDPerMTok {
+		t.Fatalf(
+			"expected default %q output pricing %g, got %g",
+			savingsCompetitorAmp,
+			defaultSavingsAmpOutputUSDPerMTok,
+			ampPricing.OutputUSDPerMTok,
+		)
+	}
+}
+
+func TestSavingsConfigEnvOverrides(t *testing.T) {
+	isolateConfigPath(t)
+
+	t.Setenv("GOCODEMUNCH_SAVINGS_TELEMETRY_ENABLED", "false")
+	t.Setenv("GOCODEMUNCH_SAVINGS_SNAPSHOT_INTERVAL_MS", "45000")
+	t.Setenv("GOCODEMUNCH_SAVINGS_CLAUDE_CODE_INPUT_USD_PER_MTOK", "4.25")
+	t.Setenv("GOCODEMUNCH_SAVINGS_CLAUDE_CODE_OUTPUT_USD_PER_MTOK", "16.75")
+	t.Setenv("GOCODEMUNCH_SAVINGS_CODEX_INPUT_USD_PER_MTOK", "2.50")
+	t.Setenv("GOCODEMUNCH_SAVINGS_CODEX_OUTPUT_USD_PER_MTOK", "8.00")
+	t.Setenv("GOCODEMUNCH_SAVINGS_AMP_INPUT_USD_PER_MTOK", "2.20")
+	t.Setenv("GOCODEMUNCH_SAVINGS_AMP_OUTPUT_USD_PER_MTOK", "7.40")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.SavingsTelemetryEnabled {
+		t.Fatalf("expected savings telemetry to be disabled via env override")
+	}
+	if cfg.SavingsSnapshotIntervalMS != 45000 {
+		t.Fatalf(
+			"expected savings snapshot interval override 45000ms, got %dms",
+			cfg.SavingsSnapshotIntervalMS,
+		)
+	}
+
+	if got := cfg.SavingsCompetitorPricing[savingsCompetitorClaudeCode]; got.InputUSDPerMTok != 4.25 || got.OutputUSDPerMTok != 16.75 {
+		t.Fatalf("unexpected claude_code pricing override: %#v", got)
+	}
+	if got := cfg.SavingsCompetitorPricing[savingsCompetitorCodex]; got.InputUSDPerMTok != 2.50 || got.OutputUSDPerMTok != 8.00 {
+		t.Fatalf("unexpected codex pricing override: %#v", got)
+	}
+	if got := cfg.SavingsCompetitorPricing[savingsCompetitorAmp]; got.InputUSDPerMTok != 2.20 || got.OutputUSDPerMTok != 7.40 {
+		t.Fatalf("unexpected amp pricing override: %#v", got)
+	}
+}
+
+func TestSavingsConfigValidationErrors(t *testing.T) {
+	isolateConfigPath(t)
+
+	t.Setenv("GOCODEMUNCH_SAVINGS_TELEMETRY_ENABLED", "maybe")
+	t.Setenv("GOCODEMUNCH_SAVINGS_SNAPSHOT_INTERVAL_MS", "0")
+	t.Setenv("GOCODEMUNCH_SAVINGS_CLAUDE_CODE_INPUT_USD_PER_MTOK", "-1")
+	t.Setenv("GOCODEMUNCH_SAVINGS_CODEX_OUTPUT_USD_PER_MTOK", "NaN-ish")
+	t.Setenv("GOCODEMUNCH_SAVINGS_AMP_INPUT_USD_PER_MTOK", "-3")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected validation error for invalid savings env configuration")
+	}
+
+	message := err.Error()
+	for _, field := range []string{
+		"GOCODEMUNCH_SAVINGS_TELEMETRY_ENABLED",
+		"GOCODEMUNCH_SAVINGS_SNAPSHOT_INTERVAL_MS",
+		"GOCODEMUNCH_SAVINGS_CLAUDE_CODE_INPUT_USD_PER_MTOK",
+		"GOCODEMUNCH_SAVINGS_CODEX_OUTPUT_USD_PER_MTOK",
+		"GOCODEMUNCH_SAVINGS_AMP_INPUT_USD_PER_MTOK",
+	} {
+		if !strings.Contains(message, field) {
+			t.Fatalf("expected validation message to mention %s: %q", field, message)
+		}
+	}
+}
+
 func TestVectorConfigDefaults(t *testing.T) {
 	isolateConfigPath(t)
 

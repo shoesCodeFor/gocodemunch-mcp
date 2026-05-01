@@ -38,7 +38,30 @@ const (
 	defaultFanoutItemTimeoutMS  = 0
 	defaultMaxFolderFiles       = 2000
 	defaultMaxIndexFiles        = 10000
+
+	defaultSavingsTelemetryEnabled   = true
+	defaultSavingsSnapshotIntervalMS = 30000
+
+	defaultSavingsClaudeCodeInputUSDPerMTok  = 3.00
+	defaultSavingsClaudeCodeOutputUSDPerMTok = 15.00
+	defaultSavingsCodexInputUSDPerMTok       = 1.50
+	defaultSavingsCodexOutputUSDPerMTok      = 6.00
+	defaultSavingsAmpInputUSDPerMTok         = 1.50
+	defaultSavingsAmpOutputUSDPerMTok        = 6.00
 )
+
+const (
+	savingsCompetitorClaudeCode = "claude_code"
+	savingsCompetitorCodex      = "codex"
+	savingsCompetitorAmp        = "amp"
+)
+
+// SavingsCompetitorPricing models per-competitor token pricing in USD per
+// million tokens.
+type SavingsCompetitorPricing struct {
+	InputUSDPerMTok  float64
+	OutputUSDPerMTok float64
+}
 
 // Config holds process-level server configuration.
 type Config struct {
@@ -105,7 +128,13 @@ type Config struct {
 	ExtraIgnorePatterns []string
 	// ExcludeSecretPatterns disables matching for specific secret patterns.
 	ExcludeSecretPatterns []string
-	Disabled              map[string]struct{}
+	// SavingsTelemetryEnabled controls whether token/cost savings telemetry is active.
+	SavingsTelemetryEnabled bool
+	// SavingsSnapshotIntervalMS controls periodic persistence cadence in milliseconds.
+	SavingsSnapshotIntervalMS int
+	// SavingsCompetitorPricing stores baseline competitor pricing in USD per million tokens.
+	SavingsCompetitorPricing map[string]SavingsCompetitorPricing
+	Disabled                 map[string]struct{}
 	// TrustedFolders constrains local indexing roots by containment policy.
 	TrustedFolders []string
 	// nil => default whitelist mode (true), non-nil => explicit whitelist/blacklist mode.
@@ -176,12 +205,18 @@ func Load() (Config, error) {
 			os.Getenv("GOCODEMUNCH_FANOUT_ITEM_TIMEOUT_MS"),
 			defaultFanoutItemTimeoutMS,
 		),
-		MaxFolderFiles: defaultMaxFolderFiles,
-		MaxIndexFiles:  defaultMaxIndexFiles,
-		Disabled:       map[string]struct{}{},
+		MaxFolderFiles:            defaultMaxFolderFiles,
+		MaxIndexFiles:             defaultMaxIndexFiles,
+		SavingsTelemetryEnabled:   defaultSavingsTelemetryEnabled,
+		SavingsSnapshotIntervalMS: defaultSavingsSnapshotIntervalMS,
+		SavingsCompetitorPricing:  defaultSavingsCompetitorPricing(),
+		Disabled:                  map[string]struct{}{},
 	}
 
 	if err := applyVectorEnvOverrides(&cfg); err != nil {
+		return cfg, err
+	}
+	if err := applySavingsEnvOverrides(&cfg); err != nil {
 		return cfg, err
 	}
 
@@ -336,6 +371,7 @@ func (c Config) clone() Config {
 	cloned.MetaFields = cloneStringSlice(c.MetaFields)
 	cloned.ExtraIgnorePatterns = cloneStringSlice(c.ExtraIgnorePatterns)
 	cloned.ExcludeSecretPatterns = cloneStringSlice(c.ExcludeSecretPatterns)
+	cloned.SavingsCompetitorPricing = cloneSavingsCompetitorPricing(c.SavingsCompetitorPricing)
 	cloned.Disabled = cloneStringSet(c.Disabled)
 	cloned.TrustedFolders = cloneStringSlice(c.TrustedFolders)
 	cloned.TrustedFoldersWhitelistMode = cloneBoolPtr(c.TrustedFoldersWhitelistMode)
@@ -626,6 +662,159 @@ func applyVectorEnvOverrides(cfg *Config) error {
 	return fmt.Errorf("vector configuration validation failed: %s", strings.Join(validationErrors, "; "))
 }
 
+func defaultSavingsCompetitorPricing() map[string]SavingsCompetitorPricing {
+	return map[string]SavingsCompetitorPricing{
+		savingsCompetitorClaudeCode: {
+			InputUSDPerMTok:  defaultSavingsClaudeCodeInputUSDPerMTok,
+			OutputUSDPerMTok: defaultSavingsClaudeCodeOutputUSDPerMTok,
+		},
+		savingsCompetitorCodex: {
+			InputUSDPerMTok:  defaultSavingsCodexInputUSDPerMTok,
+			OutputUSDPerMTok: defaultSavingsCodexOutputUSDPerMTok,
+		},
+		savingsCompetitorAmp: {
+			InputUSDPerMTok:  defaultSavingsAmpInputUSDPerMTok,
+			OutputUSDPerMTok: defaultSavingsAmpOutputUSDPerMTok,
+		},
+	}
+}
+
+func applySavingsEnvOverrides(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+
+	validationErrors := []string{}
+
+	if raw, ok := getenvTrimmed("GOCODEMUNCH_SAVINGS_TELEMETRY_ENABLED"); ok {
+		enabled, parsed := parseBoolean(raw)
+		if !parsed {
+			validationErrors = append(
+				validationErrors,
+				fmt.Sprintf(
+					"GOCODEMUNCH_SAVINGS_TELEMETRY_ENABLED must be a boolean (1/0, true/false, yes/no, on/off) (got %q); set GOCODEMUNCH_SAVINGS_TELEMETRY_ENABLED=%t",
+					raw,
+					defaultSavingsTelemetryEnabled,
+				),
+			)
+		} else {
+			cfg.SavingsTelemetryEnabled = enabled
+		}
+	}
+
+	if raw, ok := getenvTrimmed("GOCODEMUNCH_SAVINGS_SNAPSHOT_INTERVAL_MS"); ok {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 {
+			validationErrors = append(
+				validationErrors,
+				fmt.Sprintf(
+					"GOCODEMUNCH_SAVINGS_SNAPSHOT_INTERVAL_MS must be a positive integer in milliseconds (got %q); set GOCODEMUNCH_SAVINGS_SNAPSHOT_INTERVAL_MS=%d",
+					raw,
+					defaultSavingsSnapshotIntervalMS,
+				),
+			)
+		} else {
+			cfg.SavingsSnapshotIntervalMS = value
+		}
+	}
+
+	applySavingsPricingEnvOverride(
+		cfg,
+		&validationErrors,
+		"GOCODEMUNCH_SAVINGS_CLAUDE_CODE_INPUT_USD_PER_MTOK",
+		savingsCompetitorClaudeCode,
+		defaultSavingsClaudeCodeInputUSDPerMTok,
+		false,
+	)
+	applySavingsPricingEnvOverride(
+		cfg,
+		&validationErrors,
+		"GOCODEMUNCH_SAVINGS_CLAUDE_CODE_OUTPUT_USD_PER_MTOK",
+		savingsCompetitorClaudeCode,
+		defaultSavingsClaudeCodeOutputUSDPerMTok,
+		true,
+	)
+	applySavingsPricingEnvOverride(
+		cfg,
+		&validationErrors,
+		"GOCODEMUNCH_SAVINGS_CODEX_INPUT_USD_PER_MTOK",
+		savingsCompetitorCodex,
+		defaultSavingsCodexInputUSDPerMTok,
+		false,
+	)
+	applySavingsPricingEnvOverride(
+		cfg,
+		&validationErrors,
+		"GOCODEMUNCH_SAVINGS_CODEX_OUTPUT_USD_PER_MTOK",
+		savingsCompetitorCodex,
+		defaultSavingsCodexOutputUSDPerMTok,
+		true,
+	)
+	applySavingsPricingEnvOverride(
+		cfg,
+		&validationErrors,
+		"GOCODEMUNCH_SAVINGS_AMP_INPUT_USD_PER_MTOK",
+		savingsCompetitorAmp,
+		defaultSavingsAmpInputUSDPerMTok,
+		false,
+	)
+	applySavingsPricingEnvOverride(
+		cfg,
+		&validationErrors,
+		"GOCODEMUNCH_SAVINGS_AMP_OUTPUT_USD_PER_MTOK",
+		savingsCompetitorAmp,
+		defaultSavingsAmpOutputUSDPerMTok,
+		true,
+	)
+
+	if len(validationErrors) == 0 {
+		return nil
+	}
+	return fmt.Errorf("savings configuration validation failed: %s", strings.Join(validationErrors, "; "))
+}
+
+func applySavingsPricingEnvOverride(
+	cfg *Config,
+	validationErrors *[]string,
+	envKey string,
+	competitor string,
+	fallback float64,
+	output bool,
+) {
+	raw, ok := getenvTrimmed(envKey)
+	if !ok {
+		return
+	}
+
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil || value < 0 {
+		metric := "input"
+		if output {
+			metric = "output"
+		}
+		*validationErrors = append(
+			*validationErrors,
+			fmt.Sprintf(
+				"%s must be a non-negative number in USD per million %s tokens (got %q); set %s=%g",
+				envKey,
+				metric,
+				raw,
+				envKey,
+				fallback,
+			),
+		)
+		return
+	}
+
+	pricing := cfg.SavingsCompetitorPricing[competitor]
+	if output {
+		pricing.OutputUSDPerMTok = value
+	} else {
+		pricing.InputUSDPerMTok = value
+	}
+	cfg.SavingsCompetitorPricing[competitor] = pricing
+}
+
 func isHTTPBaseURL(raw string) bool {
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
@@ -854,6 +1043,20 @@ func cloneBoolPtr(input *bool) *bool {
 	}
 	value := *input
 	return &value
+}
+
+func cloneSavingsCompetitorPricing(
+	input map[string]SavingsCompetitorPricing,
+) map[string]SavingsCompetitorPricing {
+	if input == nil {
+		return nil
+	}
+
+	out := make(map[string]SavingsCompetitorPricing, len(input))
+	for competitor, pricing := range input {
+		out[competitor] = pricing
+	}
+	return out
 }
 
 func boolPtr(value bool) *bool {
