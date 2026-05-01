@@ -36,10 +36,12 @@ This phase delivers a fully autonomous vertical slice: the MCP runtime estimates
   - Completed in loop `00001`: enabled Markdown report generation for `token-savings-smoke` in `src/cmd/gocodemunch-eval`, added deterministic savings docs under `docs/evals/savings-runs/`, and added `docs/evals/Savings-Index.md` with newest-first wiki-link updates.
   - Completed in loop `00001`: stabilized savings report token estimation by canonicalizing request/response sizing for benchmark artifacts, linked reports back to `Auto Run Docs/Working/evals/token-savings-smoke.json`, and added coverage in `src/cmd/gocodemunch-eval/main_test.go`.
 
-- [ ] Add test coverage for telemetry math, persistence, orchestration integration, and eval reporting:
+- [x] Add test coverage for telemetry math, persistence, orchestration integration, and eval reporting:
   - Add unit tests for token estimation, competitor pricing conversion, and delta math edge cases.
   - Add store tests for periodic snapshot writes and cumulative reload correctness.
   - Update integration tests (including `tests-go/indexing_tools_test.go`) to validate non-zero/expected session stats behavior and stable response contracts.
+  - Completed in loop `00001`: added telemetry normalization + runtime restore/flush coverage in `src/internal/telemetry/tracker_test.go`, real SQLite periodic/reload coverage in `src/internal/storage/sqlite_telemetry_store_test.go`, stable zero/non-zero `get_session_stats` contract assertions in `src/internal/orchestration/service_telemetry_test.go` and `tests-go/indexing_tools_test.go`, and eval helper math coverage in `src/cmd/gocodemunch-eval/main_test.go`.
+  - Completed in loop `00001`: fixed `src/cmd/gocodemunch-eval/token_savings.go` so competitor cost scoring prices input and output tokens with their respective rates; verification passed via scoped `go test` and `go vet` over config, telemetry, storage, orchestration, eval CLI, and `tests-go`.
 
 - [ ] Run verification commands and ensure the prototype is visibly working:
   - Run targeted Go test suites for config, orchestration, storage/telemetry, and eval CLI.

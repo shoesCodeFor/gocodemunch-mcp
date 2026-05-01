@@ -486,10 +486,11 @@ func competitorCosts(
 	outputTokens int,
 ) map[string]float64 {
 	costs := make(map[string]float64, len(pricing))
-	billableTokens := inputTokens + outputTokens
 	for competitor, rate := range pricing {
+		inputCost := float64(inputTokens) * rate.InputUSDPerMTok / 1_000_000.0
+		outputCost := float64(outputTokens) * rate.OutputUSDPerMTok / 1_000_000.0
 		costs[competitor] = roundUSDForReport(
-			float64(billableTokens) * rate.InputUSDPerMTok / 1_000_000.0,
+			inputCost + outputCost,
 		)
 	}
 	return costs

@@ -2700,10 +2700,25 @@ func TestAdvancedAnalysisToolContracts(t *testing.T) {
 	if got := intField(sessionStats, "session_calls"); got <= 0 {
 		t.Fatalf("expected positive session_calls from live telemetry: %#v", sessionStats)
 	}
+	if got := intField(sessionStats, "session_input_tokens_saved") + intField(sessionStats, "session_output_tokens_saved"); got != intField(sessionStats, "session_tokens_saved") {
+		t.Fatalf("expected session input/output token savings to sum to session_tokens_saved: %#v", sessionStats)
+	}
+	if got := intField(sessionStats, "total_input_tokens_saved") + intField(sessionStats, "total_output_tokens_saved"); got != intField(sessionStats, "total_tokens_saved") {
+		t.Fatalf("expected total input/output token savings to sum to total_tokens_saved: %#v", sessionStats)
+	}
+	if got := intField(sessionStats, "total_calls"); got < intField(sessionStats, "session_calls") {
+		t.Fatalf("expected total_calls to be at least session_calls: %#v", sessionStats)
+	}
+	if got := intField(sessionStats, "total_sessions"); got != 1 {
+		t.Fatalf("expected one live telemetry session in clean integration run, got %#v", sessionStats)
+	}
 	sessionCost := mapField(sessionStats, "session_cost_avoided")
 	for _, competitor := range []string{"claude_code", "codex", "amp"} {
 		if _, ok := sessionCost[competitor]; !ok {
 			t.Fatalf("expected %s in session_cost_avoided: %#v", competitor, sessionStats)
+		}
+		if numeric := intField(map[string]any{competitor: sessionCost[competitor]}, competitor); numeric <= 0 && sessionCost[competitor] == 0 {
+			t.Fatalf("expected positive session cost avoided for %s: %#v", competitor, sessionStats)
 		}
 	}
 	totalCost := mapField(sessionStats, "total_cost_avoided")
@@ -2711,6 +2726,21 @@ func TestAdvancedAnalysisToolContracts(t *testing.T) {
 		if _, ok := totalCost[competitor]; !ok {
 			t.Fatalf("expected %s in total_cost_avoided: %#v", competitor, sessionStats)
 		}
+		if totalCost[competitor] != sessionCost[competitor] {
+			t.Fatalf("expected total/session cost avoided to match in fresh run for %s: %#v", competitor, sessionStats)
+		}
+	}
+	toolBreakdown := mapField(sessionStats, "tool_breakdown")
+	if len(toolBreakdown) == 0 {
+		t.Fatalf("expected non-empty tool_breakdown in live telemetry response: %#v", sessionStats)
+	}
+	sessionStatsTool := mapField(toolBreakdown, "get_session_stats")
+	if got := intField(sessionStatsTool, "call_count"); got != 1 {
+		t.Fatalf("expected get_session_stats tool breakdown entry with one call: %#v", sessionStats)
+	}
+	totalToolBreakdown := mapField(sessionStats, "total_tool_breakdown")
+	if len(totalToolBreakdown) == 0 {
+		t.Fatalf("expected non-empty total_tool_breakdown in live telemetry response: %#v", sessionStats)
 	}
 	meta, ok := sessionStats["_meta"].(map[string]any)
 	if !ok {
@@ -2719,8 +2749,8 @@ func TestAdvancedAnalysisToolContracts(t *testing.T) {
 	if got := intField(meta, "tokens_saved"); got <= 0 {
 		t.Fatalf("expected positive _meta.tokens_saved on get_session_stats: %#v", sessionStats)
 	}
-	if got := intField(meta, "total_tokens_saved"); got <= 0 {
-		t.Fatalf("expected positive _meta.total_tokens_saved on get_session_stats: %#v", sessionStats)
+	if got := intField(meta, "total_tokens_saved"); got != intField(sessionStats, "total_tokens_saved") {
+		t.Fatalf("expected _meta.total_tokens_saved to mirror total_tokens_saved: %#v", sessionStats)
 	}
 
 	blastRadius := toolPayload(t, responses[17])

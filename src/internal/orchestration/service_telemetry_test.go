@@ -166,6 +166,66 @@ func TestGetSessionStatsReturnsLiveSessionAndCumulativeTelemetry(t *testing.T) {
 	}
 }
 
+func TestGetSessionStatsReturnsStableZeroContractWithoutTelemetry(t *testing.T) {
+	service := New(testTelemetryConfig(), Dependencies{})
+
+	stats := service.CallTool(context.Background(), "get_session_stats", map[string]any{})
+
+	if got := intFieldFromAny(t, stats["session_calls"]); got != 0 {
+		t.Fatalf("expected zero session_calls without telemetry, got %#v", stats)
+	}
+	if got := intFieldFromAny(t, stats["session_tokens_saved"]); got != 0 {
+		t.Fatalf("expected zero session_tokens_saved without telemetry, got %#v", stats)
+	}
+	if got := intFieldFromAny(t, stats["total_calls"]); got != 0 {
+		t.Fatalf("expected zero total_calls without telemetry, got %#v", stats)
+	}
+	if got := intFieldFromAny(t, stats["total_sessions"]); got != 0 {
+		t.Fatalf("expected zero total_sessions without telemetry, got %#v", stats)
+	}
+	if got := intFieldFromAny(t, stats["total_tokens_saved"]); got != 0 {
+		t.Fatalf("expected zero total_tokens_saved without telemetry, got %#v", stats)
+	}
+
+	sessionCost := floatMapFromAny(t, stats["session_cost_avoided"])
+	totalCost := floatMapFromAny(t, stats["total_cost_avoided"])
+	for _, competitor := range defaultSavingsCompetitors {
+		if sessionCost[competitor] != 0 {
+			t.Fatalf("expected zero session cost for %q without telemetry, got %#v", competitor, sessionCost)
+		}
+		if totalCost[competitor] != 0 {
+			t.Fatalf("expected zero total cost for %q without telemetry, got %#v", competitor, totalCost)
+		}
+	}
+
+	if toolBreakdown, ok := stats["tool_breakdown"].(map[string]telemetry.ToolSnapshot); !ok || len(toolBreakdown) != 0 {
+		t.Fatalf("expected empty typed session tool_breakdown without telemetry, got %#v", stats["tool_breakdown"])
+	}
+	if totalBreakdown, ok := stats["total_tool_breakdown"].(map[string]telemetry.ToolSnapshot); !ok || len(totalBreakdown) != 0 {
+		t.Fatalf("expected empty typed total_tool_breakdown without telemetry, got %#v", stats["total_tool_breakdown"])
+	}
+
+	meta, ok := stats["_meta"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected _meta envelope without telemetry, got %#v", stats)
+	}
+	if got := intFieldFromAny(t, meta["tokens_saved"]); got != 0 {
+		t.Fatalf("expected zero _meta.tokens_saved without telemetry, got %#v", meta)
+	}
+	if got := intFieldFromAny(t, meta["total_tokens_saved"]); got != 0 {
+		t.Fatalf("expected zero _meta.total_tokens_saved without telemetry, got %#v", meta)
+	}
+}
+
+func TestEstimateSerializedTokensHandlesMarshalErrorsAndRoundsUp(t *testing.T) {
+	if got := estimateSerializedTokens("abcd"); got != 2 {
+		t.Fatalf("expected quoted string to round up to 2 tokens, got %d", got)
+	}
+	if got := estimateSerializedTokens(make(chan int)); got != 0 {
+		t.Fatalf("expected marshal error to return zero tokens, got %d", got)
+	}
+}
+
 func testTelemetryConfig() config.Config {
 	return config.Config{
 		ServerName:    "gocodemunch-mcp",

@@ -143,6 +143,63 @@ func TestRunWithArgsEmitsPerQueryAndAggregateMetrics(t *testing.T) {
 	}
 }
 
+func TestEstimateSerializedTokensForReportHandlesMarshalErrorsAndRoundsUp(t *testing.T) {
+	if got := estimateSerializedTokensForReport("abcd"); got != 2 {
+		t.Fatalf("expected quoted string to round up to 2 tokens, got %d", got)
+	}
+	if got := estimateSerializedTokensForReport(make(chan int)); got != 0 {
+		t.Fatalf("expected marshal error to return zero tokens, got %d", got)
+	}
+}
+
+func TestTokenSavingsTelemetryPricingPreservesCompetitorRates(t *testing.T) {
+	converted := tokenSavingsTelemetryPricing(map[string]config.SavingsCompetitorPricing{
+		"claude_code": {InputUSDPerMTok: 3.0, OutputUSDPerMTok: 15.0},
+		"codex":       {InputUSDPerMTok: 1.5, OutputUSDPerMTok: 6.0},
+	})
+
+	if got := converted["claude_code"]; got.InputUSDPerMTok != 3.0 || got.OutputUSDPerMTok != 15.0 {
+		t.Fatalf("expected claude_code pricing to be preserved, got %#v", converted)
+	}
+	if got := converted["codex"]; got.InputUSDPerMTok != 1.5 || got.OutputUSDPerMTok != 6.0 {
+		t.Fatalf("expected codex pricing to be preserved, got %#v", converted)
+	}
+}
+
+func TestCompetitorCostsAndDeltaMathUseSeparateRates(t *testing.T) {
+	pricing := map[string]config.SavingsCompetitorPricing{
+		"claude_code": {InputUSDPerMTok: 1.0, OutputUSDPerMTok: 9.0},
+		"codex":       {InputUSDPerMTok: 2.0, OutputUSDPerMTok: 4.0},
+	}
+
+	costs := competitorCosts(pricing, 100, 50)
+	if got := costs["claude_code"]; got != 0.00055 {
+		t.Fatalf("expected claude_code input/output blended cost 0.00055, got %#v", costs)
+	}
+	if got := costs["codex"]; got != 0.0004 {
+		t.Fatalf("expected codex input/output blended cost 0.0004, got %#v", costs)
+	}
+
+	diff := diffCostMap(
+		map[string]float64{"claude_code": 0.00055, "codex": 0.0004},
+		map[string]float64{"claude_code": 0.0006, "codex": 0.0001},
+		pricing,
+	)
+	if got := diff["claude_code"]; got != -0.00005 {
+		t.Fatalf("expected claude_code diff to preserve negative deltas, got %#v", diff)
+	}
+	if got := diff["codex"]; got != 0.0003 {
+		t.Fatalf("expected codex diff 0.0003, got %#v", diff)
+	}
+
+	if got := savingsRatio(0, 10); got != 0 {
+		t.Fatalf("expected zero savings ratio for zero baseline, got %v", got)
+	}
+	if got := savingsRatio(3, 1); got != 0.333333 {
+		t.Fatalf("expected rounded savings ratio 0.333333, got %v", got)
+	}
+}
+
 func TestRunWithArgsTokenSavingsSmokeEmitsSavingsReport(t *testing.T) {
 	fixturesDir := writeTokenSavingsFixtures(t, fixtureCorpus{
 		Dataset: "token-savings-smoke-test",

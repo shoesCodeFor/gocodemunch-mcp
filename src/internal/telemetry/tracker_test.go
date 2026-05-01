@@ -113,6 +113,50 @@ func TestTrackerRestoreCumulativeAddsNewSessionWork(t *testing.T) {
 	}
 }
 
+func TestTrackerRecordCallNormalizesNegativeAndBlankValues(t *testing.T) {
+	now := time.Date(2026, 5, 1, 15, 0, 0, 0, time.UTC)
+	tracker := NewTracker(
+		map[string]Pricing{
+			"codex": {InputUSDPerMTok: 1.5, OutputUSDPerMTok: 6},
+		},
+		func() time.Time { return now },
+	)
+
+	call := tracker.RecordCall(CallRecord{
+		ToolName:          "   ",
+		RequestTokens:     -10,
+		ResponseTokens:    -5,
+		InputTokensSaved:  -3,
+		OutputTokensSaved: -1,
+	})
+
+	if call.ToolName != "unknown" {
+		t.Fatalf("expected blank tool name to normalize to unknown, got %#v", call)
+	}
+	if call.StartedAt != now || call.FinishedAt != now {
+		t.Fatalf("expected zero timestamps to normalize to now, got %#v", call)
+	}
+	if call.DurationMS != 0 {
+		t.Fatalf("expected zero duration for normalized instant call, got %#v", call)
+	}
+	if call.RequestTokens != 0 || call.ResponseTokens != 0 || call.TotalTokens != 0 {
+		t.Fatalf("expected negative token counts to clamp to zero, got %#v", call)
+	}
+	if call.InputTokensSaved != 0 || call.OutputTokensSaved != 0 || call.TokensSaved != 0 {
+		t.Fatalf("expected negative saved token counts to clamp to zero, got %#v", call)
+	}
+	if !almostEqual(call.CostAvoidedUSD["codex"], 0) {
+		t.Fatalf("expected zero avoided cost after clamping negatives, got %#v", call.CostAvoidedUSD)
+	}
+
+	session := tracker.SessionSnapshot()
+	if tool, ok := session.ToolBreakdown["unknown"]; !ok {
+		t.Fatalf("expected normalized unknown tool breakdown entry, got %#v", session.ToolBreakdown)
+	} else if tool.CallCount != 1 || tool.TokensSaved != 0 {
+		t.Fatalf("unexpected normalized tool breakdown: %#v", tool)
+	}
+}
+
 func TestRuntimePersistsPeriodicallyAndOnClose(t *testing.T) {
 	store := &runtimeStoreStub{
 		saveCh: make(chan PersistedCumulativeSnapshot, 4),
@@ -163,6 +207,89 @@ func TestRuntimePersistsPeriodicallyAndOnClose(t *testing.T) {
 	}
 	if saves := store.saveCount(); saves < 2 {
 		t.Fatalf("expected at least two persisted snapshots, got %d", saves)
+	}
+}
+
+func TestRuntimeRestoresPersistedCumulativeAndSkipsRedundantFlushes(t *testing.T) {
+	now := time.Date(2026, 5, 1, 16, 0, 0, 0, time.UTC)
+	store := &runtimeStoreStub{
+		load: PersistedCumulativeSnapshot{
+			CapturedAt: now.Add(-time.Hour),
+			Cumulative: CumulativeSnapshot{
+				FirstRecordedAt:   now.Add(-48 * time.Hour),
+				LastRecordedAt:    now.Add(-time.Hour),
+				SessionCount:      2,
+				CallCount:         4,
+				RequestTokens:     90,
+				ResponseTokens:    30,
+				TotalTokens:       120,
+				InputTokensSaved:  30,
+				OutputTokensSaved: 10,
+				TokensSaved:       40,
+				CostAvoidedUSD:    map[string]float64{"codex": 0.000105},
+				ToolBreakdown: map[string]ToolSnapshot{
+					"seeded_tool": {
+						CallCount:      4,
+						RequestTokens:  90,
+						ResponseTokens: 30,
+						TotalTokens:    120,
+						TokensSaved:    40,
+						CostAvoidedUSD: map[string]float64{"codex": 0.000105},
+					},
+				},
+			},
+		},
+	}
+
+	runtime, err := NewRuntime(RuntimeConfig{
+		Pricing: map[string]Pricing{
+			"codex": {InputUSDPerMTok: 1.5, OutputUSDPerMTok: 6},
+		},
+		Store: store,
+		Now:   func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("create runtime: %v", err)
+	}
+
+	restored := runtime.CumulativeSnapshot()
+	if restored.SessionCount != 2 || restored.CallCount != 4 || restored.TokensSaved != 40 {
+		t.Fatalf("expected restored cumulative snapshot, got %#v", restored)
+	}
+
+	if err := runtime.Flush(context.Background()); err != nil {
+		t.Fatalf("flush restored runtime: %v", err)
+	}
+	if saves := store.saveCount(); saves != 1 {
+		t.Fatalf("expected first flush to persist restored snapshot once, got %d", saves)
+	}
+
+	if err := runtime.Flush(context.Background()); err != nil {
+		t.Fatalf("flush without changes: %v", err)
+	}
+	if saves := store.saveCount(); saves != 1 {
+		t.Fatalf("expected redundant flush to be skipped, got %d saves", saves)
+	}
+
+	runtime.RecordCall(CallRecord{
+		ToolName:          "search_text",
+		StartedAt:         now.Add(-250 * time.Millisecond),
+		FinishedAt:        now,
+		RequestTokens:     20,
+		ResponseTokens:    10,
+		InputTokensSaved:  5,
+		OutputTokensSaved: 2,
+	})
+	if err := runtime.Flush(context.Background()); err != nil {
+		t.Fatalf("flush after new call: %v", err)
+	}
+	if saves := store.saveCount(); saves != 2 {
+		t.Fatalf("expected changed revision to persist a second snapshot, got %d", saves)
+	}
+
+	updated := runtime.CumulativeSnapshot()
+	if updated.SessionCount != 3 || updated.CallCount != 5 || updated.TokensSaved != 47 {
+		t.Fatalf("expected restored totals plus new session call, got %#v", updated)
 	}
 }
 
