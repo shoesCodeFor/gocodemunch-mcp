@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -117,12 +118,7 @@ func runTokenSavingsSmokeMode(
 	cfg config.Config,
 	fixturesDirRaw string,
 	keepData bool,
-	skipMarkdownReport bool,
 ) (tokenSavingsSmokeReport, error) {
-	if !skipMarkdownReport {
-		return tokenSavingsSmokeReport{}, errors.New("markdown report generation is not supported for token-savings-smoke yet; pass --skip-markdown-report")
-	}
-
 	fixturesDir, err := resolveFixturesDir(fixturesDirRaw)
 	if err != nil {
 		return tokenSavingsSmokeReport{}, err
@@ -176,6 +172,7 @@ func runTokenSavingsSmokeMode(
 	if repoID == "" {
 		return tokenSavingsSmokeReport{}, errors.New("index fixture corpus: missing repo id")
 	}
+	reportedRepoID := buildTokenSavingsReportRepoID(fixtures.Dataset)
 
 	documentsByPath := make(map[string]fixtureDocument, len(fixtures.Documents))
 	for _, doc := range fixtures.Documents {
@@ -188,8 +185,6 @@ func runTokenSavingsSmokeMode(
 	totalWithoutInput := 0
 
 	for _, benchmarkCase := range fixtures.Cases {
-		before := tracker.SessionSnapshot()
-
 		toolArgs := cloneAnyMap(benchmarkCase.Arguments)
 		toolArgs["repo"] = repoID
 		response := service.CallTool(ctx, benchmarkCase.Tool, toolArgs)
@@ -197,9 +192,16 @@ func runTokenSavingsSmokeMode(
 			return tokenSavingsSmokeReport{}, fmt.Errorf("run case %q via %s: %s", benchmarkCase.ID, benchmarkCase.Tool, errMsg)
 		}
 
-		after := tracker.SessionSnapshot()
-		withRequestTokens := after.RequestTokens - before.RequestTokens
-		withResponseTokens := after.ResponseTokens - before.ResponseTokens
+		withRequestTokens := estimateSerializedTokensForReport(map[string]any{
+			"name": benchmarkCase.Tool,
+			"arguments": buildTokenSavingsRequestArguments(
+				benchmarkCase.Arguments,
+				reportedRepoID,
+			),
+		})
+		withResponseTokens := estimateSerializedTokensForReport(
+			canonicalizeTokenSavingsResponsePayload(response),
+		)
 		promptTokens := estimateSerializedTokensForReport(map[string]any{
 			"prompt": benchmarkCase.Prompt,
 		})
@@ -266,7 +268,7 @@ func runTokenSavingsSmokeMode(
 		Dataset:           fixtures.Dataset,
 		SuiteVersion:      fixtures.SuiteVersion,
 		FixturesDir:       fixturesDir,
-		IndexedRepo:       repoID,
+		IndexedRepo:       reportedRepoID,
 		FileCount:         len(fixtures.Documents),
 		CompetitorPricing: pricing,
 		Cases:             caseReports,
@@ -539,4 +541,259 @@ func payloadString(payload map[string]any, key string) string {
 
 func payloadError(payload map[string]any) string {
 	return payloadString(payload, "error")
+}
+
+func writeTokenSavingsMarkdownRunReport(
+	rawDir string,
+	report tokenSavingsSmokeReport,
+	jsonOutPath string,
+) (string, error) {
+	reportDir := strings.TrimSpace(rawDir)
+	if reportDir == "" {
+		return "", errors.New("markdown report dir must be non-empty")
+	}
+	reportDir = filepath.Clean(reportDir)
+
+	if err := os.MkdirAll(reportDir, 0o755); err != nil {
+		return "", fmt.Errorf("create markdown report directory %q: %w", reportDir, err)
+	}
+
+	fileName := buildMarkdownReportFileName(report.Dataset, report.GeneratedAtUTC)
+	reportPath := filepath.Join(reportDir, fileName)
+	content := renderTokenSavingsMarkdownRunReport(report, jsonOutPath)
+	if err := os.WriteFile(reportPath, []byte(content), 0o644); err != nil {
+		return "", fmt.Errorf("write token savings markdown report %q: %w", reportPath, err)
+	}
+
+	return reportPath, nil
+}
+
+func writeTokenSavingsIndex(markdownReportDir string, markdownReportPath string, generatedAtUTC string) (string, error) {
+	return writeMarkdownRunIndex(
+		markdownReportDir,
+		markdownReportPath,
+		generatedAtUTC,
+		tokenSavingsIndexFileName,
+		renderTokenSavingsIndexMarkdown,
+	)
+}
+
+func renderTokenSavingsMarkdownRunReport(report tokenSavingsSmokeReport, jsonOutPath string) string {
+	createdDate := createdDateFromRFC3339(report.GeneratedAtUTC)
+	title := fmt.Sprintf(
+		"Token Savings Run %s %s",
+		strings.TrimSpace(report.Dataset),
+		strings.TrimSpace(report.GeneratedAtUTC),
+	)
+	tags := collectTokenSavingsMarkdownTags(report)
+	relatedLinks := collectTokenSavingsMarkdownRelatedLinks(jsonOutPath)
+	competitors := orderedTokenSavingsCompetitors(report.CompetitorPricing)
+
+	var b strings.Builder
+	b.WriteString("---\n")
+	b.WriteString("type: report\n")
+	b.WriteString(fmt.Sprintf("title: %s\n", title))
+	b.WriteString(fmt.Sprintf("created: %s\n", createdDate))
+	b.WriteString("tags:\n")
+	for _, tag := range tags {
+		b.WriteString(fmt.Sprintf("  - %s\n", tag))
+	}
+	b.WriteString("related:\n")
+	for _, link := range relatedLinks {
+		b.WriteString(fmt.Sprintf("  - '[[%s]]'\n", link))
+	}
+	b.WriteString("---\n\n")
+
+	b.WriteString("## Summary\n\n")
+	b.WriteString(fmt.Sprintf("- Generated (UTC): `%s`\n", report.GeneratedAtUTC))
+	b.WriteString(fmt.Sprintf("- Mode: `%s`\n", report.Mode))
+	b.WriteString(fmt.Sprintf("- Dataset: `%s`\n", report.Dataset))
+	b.WriteString(fmt.Sprintf("- Suite Version: `%s`\n", report.SuiteVersion))
+	b.WriteString(fmt.Sprintf("- Fixtures Dir: `%s`\n", report.FixturesDir))
+	b.WriteString(fmt.Sprintf("- Indexed Repo: `%s`\n", report.IndexedRepo))
+	b.WriteString(fmt.Sprintf("- File Count: `%d`\n", report.FileCount))
+	if outPath := strings.TrimSpace(jsonOutPath); outPath != "" {
+		b.WriteString(fmt.Sprintf("- JSON Artifact: `%s`\n", outPath))
+	}
+	b.WriteString(fmt.Sprintf("- Tokens Saved: `%d`\n", report.Aggregate.Savings.TokensSaved))
+	b.WriteString(fmt.Sprintf("- Savings Percentage: `%s`\n", formatSavingsPctForMarkdown(report.Aggregate.Savings.SavingsPct)))
+
+	b.WriteString("\n## Aggregate Tokens\n\n")
+	b.WriteString("| Mode | Input Tokens | Output Tokens | Total Tokens |\n")
+	b.WriteString("| --- | ---: | ---: | ---: |\n")
+	b.WriteString(fmt.Sprintf(
+		"| with_mcp | %d | %d | %d |\n",
+		report.Aggregate.WithMCP.InputTokens,
+		report.Aggregate.WithMCP.OutputTokens,
+		report.Aggregate.WithMCP.TotalTokens,
+	))
+	b.WriteString(fmt.Sprintf(
+		"| without_mcp | %d | %d | %d |\n",
+		report.Aggregate.WithoutMCP.InputTokens,
+		report.Aggregate.WithoutMCP.OutputTokens,
+		report.Aggregate.WithoutMCP.TotalTokens,
+	))
+
+	if len(competitors) > 0 {
+		b.WriteString("\n## Competitor Pricing\n\n")
+		b.WriteString("| Competitor | Input USD / MTok | Output USD / MTok |\n")
+		b.WriteString("| --- | ---: | ---: |\n")
+		for _, competitor := range competitors {
+			rate := report.CompetitorPricing[competitor]
+			b.WriteString(fmt.Sprintf(
+				"| %s | %.6f | %.6f |\n",
+				competitor,
+				rate.InputUSDPerMTok,
+				rate.OutputUSDPerMTok,
+			))
+		}
+
+		b.WriteString("\n## Aggregate Cost Savings\n\n")
+		b.WriteString("| Competitor | With MCP Cost (USD) | Without MCP Cost (USD) | Cost Saved (USD) |\n")
+		b.WriteString("| --- | ---: | ---: | ---: |\n")
+		for _, competitor := range competitors {
+			b.WriteString(fmt.Sprintf(
+				"| %s | %s | %s | %s |\n",
+				competitor,
+				formatUSDForMarkdown(report.Aggregate.WithMCP.CostUSD[competitor]),
+				formatUSDForMarkdown(report.Aggregate.WithoutMCP.CostUSD[competitor]),
+				formatUSDForMarkdown(report.Aggregate.Savings.CostSavedUSD[competitor]),
+			))
+		}
+	}
+
+	b.WriteString("\n## Per-Case Savings\n\n")
+	b.WriteString("| Case | Tool | With MCP Tokens | Without MCP Tokens | Tokens Saved | Savings % |\n")
+	b.WriteString("| --- | --- | ---: | ---: | ---: | ---: |\n")
+	for _, row := range report.Cases {
+		b.WriteString(fmt.Sprintf(
+			"| %s | %s | %d | %d | %d | %s |\n",
+			row.ID,
+			row.Tool,
+			row.WithMCP.TotalTokens,
+			row.WithoutMCP.TotalTokens,
+			row.Savings.TokensSaved,
+			formatSavingsPctForMarkdown(row.Savings.SavingsPct),
+		))
+	}
+
+	return b.String()
+}
+
+func renderTokenSavingsIndexMarkdown(createdDate string, links []string) string {
+	created := strings.TrimSpace(createdDate)
+	if created == "" {
+		created = nowUTCFn().Format("2006-01-02")
+	}
+
+	var b strings.Builder
+	b.WriteString("---\n")
+	b.WriteString("type: reference\n")
+	b.WriteString("title: Savings Index\n")
+	b.WriteString(fmt.Sprintf("created: %s\n", created))
+	b.WriteString("tags:\n")
+	b.WriteString("  - eval\n")
+	b.WriteString("  - token-savings\n")
+	b.WriteString("  - index\n")
+	b.WriteString("related:\n")
+	b.WriteString("  - '[[Eval-Index]]'\n")
+	b.WriteString("---\n\n")
+	b.WriteString("# Savings Index\n\n")
+	b.WriteString("Newest-first wiki-links to token savings reports in `docs/evals/savings-runs`.\n\n")
+	if len(links) == 0 {
+		b.WriteString("- None yet\n")
+		return b.String()
+	}
+	for _, link := range links {
+		b.WriteString(fmt.Sprintf("- [[%s]]\n", link))
+	}
+	return b.String()
+}
+
+func collectTokenSavingsMarkdownTags(report tokenSavingsSmokeReport) []string {
+	tagSet := map[string]struct{}{
+		"eval":          {},
+		"token-savings": {},
+	}
+	if dataset := sanitizeTagValue(report.Dataset); dataset != "" {
+		tagSet["dataset-"+dataset] = struct{}{}
+	}
+	if mode := sanitizeTagValue(report.Mode); mode != "" {
+		tagSet["mode-"+mode] = struct{}{}
+	}
+	if suiteVersion := sanitizeTagValue(report.SuiteVersion); suiteVersion != "" {
+		tagSet["suite-"+suiteVersion] = struct{}{}
+	}
+	for competitor := range report.CompetitorPricing {
+		if normalized := sanitizeTagValue(competitor); normalized != "" {
+			tagSet["competitor-"+normalized] = struct{}{}
+		}
+	}
+
+	tags := make([]string, 0, len(tagSet))
+	for tag := range tagSet {
+		tags = append(tags, tag)
+	}
+	slices.Sort(tags)
+	return tags
+}
+
+func collectTokenSavingsMarkdownRelatedLinks(jsonOutPath string) []string {
+	relatedSet := map[string]struct{}{
+		"Eval-Index":    {},
+		"Savings-Index": {},
+	}
+	if outPath := strings.TrimSpace(jsonOutPath); outPath != "" {
+		baseName := strings.TrimSuffix(filepath.Base(outPath), filepath.Ext(outPath))
+		baseName = strings.TrimSpace(baseName)
+		if baseName != "" {
+			relatedSet[baseName] = struct{}{}
+		}
+	}
+
+	related := make([]string, 0, len(relatedSet))
+	for link := range relatedSet {
+		related = append(related, link)
+	}
+	slices.Sort(related)
+	return related
+}
+
+func orderedTokenSavingsCompetitors(
+	pricing map[string]config.SavingsCompetitorPricing,
+) []string {
+	competitors := make([]string, 0, len(pricing))
+	for competitor := range pricing {
+		competitors = append(competitors, competitor)
+	}
+	slices.Sort(competitors)
+	return competitors
+}
+
+func formatSavingsPctForMarkdown(value float64) string {
+	return fmt.Sprintf("%.2f%%", value*100.0)
+}
+
+func formatUSDForMarkdown(value float64) string {
+	return fmt.Sprintf("%.6f", value)
+}
+
+func buildTokenSavingsReportRepoID(dataset string) string {
+	normalized := sanitizeTagValue(dataset)
+	if normalized == "" {
+		normalized = "fixture-corpus"
+	}
+	return fmt.Sprintf("token-savings-%s", normalized)
+}
+
+func buildTokenSavingsRequestArguments(arguments map[string]any, repoID string) map[string]any {
+	cloned := cloneAnyMap(arguments)
+	cloned["repo"] = repoID
+	return cloned
+}
+
+func canonicalizeTokenSavingsResponsePayload(payload map[string]any) map[string]any {
+	cloned := cloneAnyMap(payload)
+	delete(cloned, "_meta")
+	return cloned
 }

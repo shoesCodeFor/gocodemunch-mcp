@@ -26,13 +26,15 @@ import (
 )
 
 const (
-	defaultEvalMode          = "retrieval-eval"
-	evalModeTokenSavings     = "token-savings-smoke"
-	defaultFixturesDir       = "tests-go/evals/fixtures"
-	defaultNamespacePrefix   = "eval-fixtures"
-	defaultMarkdownReportDir = "docs/evals/runs"
-	evalIndexFileName        = "Eval-Index.md"
-	evalGateFailureExitCode  = 3
+	defaultEvalMode                      = "retrieval-eval"
+	evalModeTokenSavings                 = "token-savings-smoke"
+	defaultFixturesDir                   = "tests-go/evals/fixtures"
+	defaultNamespacePrefix               = "eval-fixtures"
+	defaultMarkdownReportDir             = "docs/evals/runs"
+	defaultTokenSavingsMarkdownReportDir = "docs/evals/savings-runs"
+	evalIndexFileName                    = "Eval-Index.md"
+	tokenSavingsIndexFileName            = "Savings-Index.md"
+	evalGateFailureExitCode              = 3
 )
 
 const (
@@ -173,14 +175,14 @@ type evalGateFailureReport struct {
 }
 
 var (
-	loadConfigFn     = config.Load
-	createBackendFn  = newVectorBackend
-	createEmbedderFn = newEmbedder
-	closeBackendFn   = closeVectorBackend
-	nowUTCFn         = func() time.Time { return time.Now().UTC() }
-	wikiLinkPattern  = regexp.MustCompile(`\[\[([^\]]+)\]\]`)
-	evalRunDocNameRe = regexp.MustCompile(`^\d{8}-\d{6}z-.+$`)
-	createdDateRe    = regexp.MustCompile(`(?m)^created:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})\s*$`)
+	loadConfigFn         = config.Load
+	createBackendFn      = newVectorBackend
+	createEmbedderFn     = newEmbedder
+	closeBackendFn       = closeVectorBackend
+	nowUTCFn             = func() time.Time { return time.Now().UTC() }
+	wikiLinkPattern      = regexp.MustCompile(`\[\[([^\]]+)\]\]`)
+	markdownRunDocNameRe = regexp.MustCompile(`^\d{8}-\d{6}z-.+$`)
+	createdDateRe        = regexp.MustCompile(`(?m)^created:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})\s*$`)
 )
 
 func main() {
@@ -257,6 +259,11 @@ func runWithArgs(args []string, stdout, stderr io.Writer) int {
 			outPathValue = defaultTokenSavingsOutputPath
 		}
 
+		markdownReportDirValue := strings.TrimSpace(*markdownReportDirArg)
+		if _, ok := explicitFlags["markdown-report-dir"]; !ok && markdownReportDirValue == defaultMarkdownReportDir {
+			markdownReportDirValue = defaultTokenSavingsMarkdownReportDir
+		}
+
 		skipMarkdownReport := *skipMarkdownReportArg
 		if _, ok := explicitFlags["skip-markdown-report"]; !ok {
 			skipMarkdownReport = true
@@ -267,7 +274,6 @@ func runWithArgs(args []string, stdout, stderr io.Writer) int {
 			cfg,
 			fixturesDirValue,
 			*keepDataArg,
-			skipMarkdownReport,
 		)
 		if runErr != nil {
 			fmt.Fprintf(stderr, "run token savings smoke: %v\n", runErr)
@@ -282,6 +288,17 @@ func runWithArgs(args []string, stdout, stderr io.Writer) int {
 		if err := writeJSONReport(outPathValue, payload); err != nil {
 			fmt.Fprintf(stderr, "write token savings report: %v\n", err)
 			return 1
+		}
+		if !skipMarkdownReport {
+			reportPath, err := writeTokenSavingsMarkdownRunReport(markdownReportDirValue, report, outPathValue)
+			if err != nil {
+				fmt.Fprintf(stderr, "write token savings markdown report: %v\n", err)
+				return 1
+			}
+			if _, err := writeTokenSavingsIndex(markdownReportDirValue, reportPath, report.GeneratedAtUTC); err != nil {
+				fmt.Fprintf(stderr, "write token savings index: %v\n", err)
+				return 1
+			}
 		}
 		_, _ = fmt.Fprintln(stdout, string(payload))
 		return 0
@@ -1206,7 +1223,7 @@ func writeMarkdownRunReport(
 		return "", fmt.Errorf("create markdown report directory %q: %w", reportDir, err)
 	}
 
-	fileName := buildMarkdownReportFileName(report)
+	fileName := buildMarkdownReportFileName(report.Dataset, report.GeneratedAtUTC)
 	reportPath := filepath.Join(reportDir, fileName)
 	content := renderMarkdownRunReport(report, jsonOutPath)
 	if err := os.WriteFile(reportPath, []byte(content), 0o644); err != nil {
@@ -1217,6 +1234,22 @@ func writeMarkdownRunReport(
 }
 
 func writeEvalIndex(markdownReportDir string, markdownReportPath string, generatedAtUTC string) (string, error) {
+	return writeMarkdownRunIndex(
+		markdownReportDir,
+		markdownReportPath,
+		generatedAtUTC,
+		evalIndexFileName,
+		renderEvalIndexMarkdown,
+	)
+}
+
+func writeMarkdownRunIndex(
+	markdownReportDir string,
+	markdownReportPath string,
+	generatedAtUTC string,
+	indexFileName string,
+	render func(string, []string) string,
+) (string, error) {
 	reportDir := filepath.Clean(strings.TrimSpace(markdownReportDir))
 	if reportDir == "." || reportDir == "" {
 		return "", errors.New("markdown report dir must be non-empty")
@@ -1226,13 +1259,13 @@ func writeEvalIndex(markdownReportDir string, markdownReportPath string, generat
 		return "", errors.New("markdown report path must be non-empty")
 	}
 
-	evalDir := filepath.Dir(reportDir)
-	if err := os.MkdirAll(evalDir, 0o755); err != nil {
-		return "", fmt.Errorf("create eval docs directory %q: %w", evalDir, err)
+	docsDir := filepath.Dir(reportDir)
+	if err := os.MkdirAll(docsDir, 0o755); err != nil {
+		return "", fmt.Errorf("create markdown docs directory %q: %w", docsDir, err)
 	}
-	indexPath := filepath.Join(evalDir, evalIndexFileName)
+	indexPath := filepath.Join(docsDir, indexFileName)
 
-	links, createdDate, err := loadEvalIndexState(indexPath)
+	links, createdDate, err := loadMarkdownRunIndexState(indexPath)
 	if err != nil {
 		return "", err
 	}
@@ -1242,20 +1275,20 @@ func writeEvalIndex(markdownReportDir string, markdownReportPath string, generat
 		return "", errors.New("markdown report path must include a filename")
 	}
 	links = append(links, reportDocName)
-	links = uniqueEvalRunLinks(links)
-	sortEvalRunLinksNewestFirst(links)
+	links = uniqueMarkdownRunLinks(links)
+	sortMarkdownRunLinksNewestFirst(links)
 
 	if createdDate == "" {
 		createdDate = createdDateFromRFC3339(generatedAtUTC)
 	}
-	content := renderEvalIndexMarkdown(createdDate, links)
+	content := render(createdDate, links)
 	if err := os.WriteFile(indexPath, []byte(content), 0o644); err != nil {
-		return "", fmt.Errorf("write eval index %q: %w", indexPath, err)
+		return "", fmt.Errorf("write markdown index %q: %w", indexPath, err)
 	}
 	return indexPath, nil
 }
 
-func loadEvalIndexState(indexPath string) ([]string, string, error) {
+func loadMarkdownRunIndexState(indexPath string) ([]string, string, error) {
 	contentBytes, err := os.ReadFile(indexPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -1271,7 +1304,7 @@ func loadEvalIndexState(indexPath string) ([]string, string, error) {
 		if len(match) < 2 {
 			continue
 		}
-		name := normalizeEvalRunDocName(match[1])
+		name := normalizeMarkdownRunDocName(match[1])
 		if name == "" {
 			continue
 		}
@@ -1283,10 +1316,10 @@ func loadEvalIndexState(indexPath string) ([]string, string, error) {
 		createdDate = strings.TrimSpace(match[1])
 	}
 
-	return uniqueEvalRunLinks(links), createdDate, nil
+	return uniqueMarkdownRunLinks(links), createdDate, nil
 }
 
-func normalizeEvalRunDocName(raw string) string {
+func normalizeMarkdownRunDocName(raw string) string {
 	name := strings.TrimSpace(raw)
 	name = strings.Trim(name, "\"'")
 	name = strings.TrimSuffix(name, filepath.Ext(name))
@@ -1294,20 +1327,20 @@ func normalizeEvalRunDocName(raw string) string {
 	if name == "" {
 		return ""
 	}
-	if !evalRunDocNameRe.MatchString(strings.ToLower(name)) {
+	if !markdownRunDocNameRe.MatchString(strings.ToLower(name)) {
 		return ""
 	}
 	return name
 }
 
-func uniqueEvalRunLinks(links []string) []string {
+func uniqueMarkdownRunLinks(links []string) []string {
 	if len(links) == 0 {
 		return nil
 	}
 	seen := map[string]struct{}{}
 	ordered := make([]string, 0, len(links))
 	for _, link := range links {
-		normalized := normalizeEvalRunDocName(link)
+		normalized := normalizeMarkdownRunDocName(link)
 		if normalized == "" {
 			continue
 		}
@@ -1320,10 +1353,10 @@ func uniqueEvalRunLinks(links []string) []string {
 	return ordered
 }
 
-func sortEvalRunLinksNewestFirst(links []string) {
+func sortMarkdownRunLinksNewestFirst(links []string) {
 	slices.SortFunc(links, func(left, right string) int {
-		leftTime, leftOK := parseEvalRunDocTime(left)
-		rightTime, rightOK := parseEvalRunDocTime(right)
+		leftTime, leftOK := parseMarkdownRunDocTime(left)
+		rightTime, rightOK := parseMarkdownRunDocTime(right)
 		switch {
 		case leftOK && rightOK:
 			if leftTime.After(rightTime) {
@@ -1341,7 +1374,7 @@ func sortEvalRunLinksNewestFirst(links []string) {
 	})
 }
 
-func parseEvalRunDocTime(docName string) (time.Time, bool) {
+func parseMarkdownRunDocTime(docName string) (time.Time, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(docName))
 	if len(normalized) < len("20060102-150405z") {
 		return time.Time{}, false
@@ -1382,20 +1415,20 @@ func renderEvalIndexMarkdown(createdDate string, links []string) string {
 	return b.String()
 }
 
-func buildMarkdownReportFileName(report evalRunReport) string {
-	timestamp := sanitizeTagValue(strings.TrimSpace(report.GeneratedAtUTC))
-	if parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(report.GeneratedAtUTC)); err == nil {
+func buildMarkdownReportFileName(dataset string, generatedAtUTC string) string {
+	timestamp := sanitizeTagValue(strings.TrimSpace(generatedAtUTC))
+	if parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(generatedAtUTC)); err == nil {
 		timestamp = strings.ToLower(parsed.UTC().Format("20060102-150405Z"))
 	}
 	if timestamp == "" {
 		timestamp = "unknown-time"
 	}
 
-	dataset := sanitizeTagValue(report.Dataset)
-	if dataset == "" {
-		dataset = "dataset"
+	datasetTag := sanitizeTagValue(dataset)
+	if datasetTag == "" {
+		datasetTag = "dataset"
 	}
-	return fmt.Sprintf("%s-%s.md", timestamp, dataset)
+	return fmt.Sprintf("%s-%s.md", timestamp, datasetTag)
 }
 
 func renderMarkdownRunReport(report evalRunReport, jsonOutPath string) string {

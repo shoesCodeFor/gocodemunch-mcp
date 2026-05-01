@@ -29,10 +29,12 @@ This phase delivers a fully autonomous vertical slice: the MCP runtime estimates
   - Completed in loop `00001`: added `--mode token-savings-smoke` in `src/cmd/gocodemunch-eval`, a deterministic prompt suite under `tests-go/evals/fixtures/token-savings-smoke`, and a real MCP-vs-raw-context scorer that emits per-case plus aggregate token/cost deltas for `claude_code`, `codex`, and `amp`.
   - Completed in loop `00001`: added `make eval-savings-smoke`, verified `Auto Run Docs/Working/evals/token-savings-smoke.json` is generated end-to-end, and added coverage in `src/cmd/gocodemunch-eval/main_test.go` plus `tests-go/token_savings_fixtures_test.go`.
 
-- [ ] Emit structured Markdown savings artifacts compatible with DocGraph navigation:
+- [x] Emit structured Markdown savings artifacts compatible with DocGraph navigation:
   - Extend report rendering to write savings Markdown run reports with YAML front matter (`type`, `title`, `created`, `tags`, `related`) and wiki-links.
   - Create/update an index-style document (for example `Savings-Index`) that links newest-first run reports using `[[...]]` cross-references.
   - Ensure generated docs are deterministic and tied to the JSON output artifact for quick verification.
+  - Completed in loop `00001`: enabled Markdown report generation for `token-savings-smoke` in `src/cmd/gocodemunch-eval`, added deterministic savings docs under `docs/evals/savings-runs/`, and added `docs/evals/Savings-Index.md` with newest-first wiki-link updates.
+  - Completed in loop `00001`: stabilized savings report token estimation by canonicalizing request/response sizing for benchmark artifacts, linked reports back to `Auto Run Docs/Working/evals/token-savings-smoke.json`, and added coverage in `src/cmd/gocodemunch-eval/main_test.go`.
 
 - [ ] Add test coverage for telemetry math, persistence, orchestration integration, and eval reporting:
   - Add unit tests for token estimation, competitor pricing conversion, and delta math edge cases.

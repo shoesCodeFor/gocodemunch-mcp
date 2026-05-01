@@ -1,10 +1,10 @@
 {
-  "generated_at_utc": "2026-05-01T06:58:56Z",
+  "generated_at_utc": "2026-05-01T07:10:27Z",
   "mode": "token-savings-smoke",
   "dataset": "token-savings-smoke",
   "suite_version": "v1",
   "fixtures_dir": "tests-go/evals/fixtures/token-savings-smoke",
-  "indexed_repo": "local/gocodemunch-token-savings-2454131706-c578c524",
+  "indexed_repo": "token-savings-token-savings-smoke",
   "file_count": 4,
   "competitor_pricing_usd_per_mtok": {
     "amp": {
@@ -35,15 +35,15 @@
         "app/reporting.py"
       ],
       "with_mcp": {
-        "input_tokens": 45,
-        "output_tokens": 72,
-        "total_tokens": 117,
-        "tool_request_tokens": 30,
-        "tool_response_tokens": 72,
+        "input_tokens": 41,
+        "output_tokens": 61,
+        "total_tokens": 102,
+        "tool_request_tokens": 26,
+        "tool_response_tokens": 61,
         "cost_usd": {
-          "amp": 0.0001755,
-          "claude_code": 0.000351,
-          "codex": 0.0001755
+          "amp": 0.000153,
+          "claude_code": 0.000306,
+          "codex": 0.000153
         }
       },
       "without_mcp": {
@@ -58,12 +58,12 @@
         }
       },
       "savings": {
-        "tokens_saved": 204,
-        "savings_pct": 0.635514,
+        "tokens_saved": 219,
+        "savings_pct": 0.682243,
         "cost_saved_usd": {
-          "amp": 0.000306,
-          "claude_code": 0.000612,
-          "codex": 0.000306
+          "amp": 0.0003285,
+          "claude_code": 0.000657,
+          "codex": 0.0003285
         }
       }
     },
@@ -79,15 +79,15 @@
         "pkg/http_client.py"
       ],
       "with_mcp": {
-        "input_tokens": 47,
-        "output_tokens": 74,
-        "total_tokens": 121,
-        "tool_request_tokens": 34,
-        "tool_response_tokens": 74,
+        "input_tokens": 43,
+        "output_tokens": 36,
+        "total_tokens": 79,
+        "tool_request_tokens": 30,
+        "tool_response_tokens": 36,
         "cost_usd": {
-          "amp": 0.0001815,
-          "claude_code": 0.000363,
-          "codex": 0.0001815
+          "amp": 0.0001185,
+          "claude_code": 0.000237,
+          "codex": 0.0001185
         }
       },
       "without_mcp": {
@@ -102,12 +102,12 @@
         }
       },
       "savings": {
-        "tokens_saved": 82,
-        "savings_pct": 0.403941,
+        "tokens_saved": 124,
+        "savings_pct": 0.610837,
         "cost_saved_usd": {
-          "amp": 0.000123,
-          "claude_code": 0.000246,
-          "codex": 0.000123
+          "amp": 0.000186,
+          "claude_code": 0.000372,
+          "codex": 0.000186
         }
       }
     },
@@ -126,15 +126,15 @@
         "app/reporting.py"
       ],
       "with_mcp": {
-        "input_tokens": 52,
-        "output_tokens": 134,
-        "total_tokens": 186,
-        "tool_request_tokens": 38,
-        "tool_response_tokens": 134,
+        "input_tokens": 47,
+        "output_tokens": 83,
+        "total_tokens": 130,
+        "tool_request_tokens": 33,
+        "tool_response_tokens": 83,
         "cost_usd": {
-          "amp": 0.000279,
-          "claude_code": 0.000558,
-          "codex": 0.000279
+          "amp": 0.000195,
+          "claude_code": 0.00039,
+          "codex": 0.000195
         }
       },
       "without_mcp": {
@@ -149,12 +149,12 @@
         }
       },
       "savings": {
-        "tokens_saved": 134,
-        "savings_pct": 0.41875,
+        "tokens_saved": 190,
+        "savings_pct": 0.59375,
         "cost_saved_usd": {
-          "amp": 0.000201,
-          "claude_code": 0.000402,
-          "codex": 0.000201
+          "amp": 0.000285,
+          "claude_code": 0.00057,
+          "codex": 0.000285
         }
       }
     },
@@ -173,15 +173,15 @@
         "app/reporting.py"
       ],
       "with_mcp": {
-        "input_tokens": 48,
-        "output_tokens": 109,
-        "total_tokens": 157,
-        "tool_request_tokens": 37,
-        "tool_response_tokens": 109,
+        "input_tokens": 43,
+        "output_tokens": 58,
+        "total_tokens": 101,
+        "tool_request_tokens": 32,
+        "tool_response_tokens": 58,
         "cost_usd": {
-          "amp": 0.0002355,
-          "claude_code": 0.000471,
-          "codex": 0.0002355
+          "amp": 0.0001515,
+          "claude_code": 0.000303,
+          "codex": 0.0001515
         }
       },
       "without_mcp": {
@@ -196,12 +196,12 @@
         }
       },
       "savings": {
-        "tokens_saved": 160,
-        "savings_pct": 0.504732,
+        "tokens_saved": 216,
+        "savings_pct": 0.681388,
         "cost_saved_usd": {
-          "amp": 0.00024,
-          "claude_code": 0.00048,
-          "codex": 0.00024
+          "amp": 0.000324,
+          "claude_code": 0.000648,
+          "codex": 0.000324
         }
       }
     },
@@ -221,15 +221,15 @@
         "app/reporting.py"
       ],
       "with_mcp": {
-        "input_tokens": 51,
-        "output_tokens": 252,
-        "total_tokens": 303,
-        "tool_request_tokens": 40,
-        "tool_response_tokens": 252,
+        "input_tokens": 46,
+        "output_tokens": 227,
+        "total_tokens": 273,
+        "tool_request_tokens": 35,
+        "tool_response_tokens": 227,
         "cost_usd": {
-          "amp": 0.0004545,
-          "claude_code": 0.000909,
-          "codex": 0.0004545
+          "amp": 0.0004095,
+          "claude_code": 0.000819,
+          "codex": 0.0004095
         }
       },
       "without_mcp": {
@@ -244,12 +244,12 @@
         }
       },
       "savings": {
-        "tokens_saved": 14,
-        "savings_pct": 0.044164,
+        "tokens_saved": 44,
+        "savings_pct": 0.138801,
         "cost_saved_usd": {
-          "amp": 0.000021,
-          "claude_code": 0.000042,
-          "codex": 0.000021
+          "amp": 0.000066,
+          "claude_code": 0.000132,
+          "codex": 0.000066
         }
       }
     }
@@ -257,13 +257,13 @@
   "aggregate": {
     "case_count": 5,
     "with_mcp": {
-      "input_tokens": 243,
-      "output_tokens": 641,
-      "total_tokens": 884,
+      "input_tokens": 220,
+      "output_tokens": 465,
+      "total_tokens": 685,
       "cost_usd": {
-        "amp": 0.001326,
-        "claude_code": 0.002652,
-        "codex": 0.001326
+        "amp": 0.0010275,
+        "claude_code": 0.002055,
+        "codex": 0.0010275
       }
     },
     "without_mcp": {
@@ -277,12 +277,12 @@
       }
     },
     "savings": {
-      "tokens_saved": 594,
-      "savings_pct": 0.401894,
+      "tokens_saved": 793,
+      "savings_pct": 0.536536,
       "cost_saved_usd": {
-        "amp": 0.000891,
-        "claude_code": 0.001782,
-        "codex": 0.000891
+        "amp": 0.0011895,
+        "claude_code": 0.002379,
+        "codex": 0.0011895
       }
     }
   }

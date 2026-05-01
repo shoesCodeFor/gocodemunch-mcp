@@ -54,7 +54,9 @@ Compiled binaries are written to `./bin`:
 - `make bench` – run the benchmark script
 - `make race` – run the race-detection script
 
-All three eval make targets are non-interactive and pass `--skip-markdown-report` by default. Override defaults with make variables like `EVAL_FIXTURES_DIR`, `EVAL_NAMESPACE_PREFIX`, `EVAL_SMOKE_PROVIDERS`, `EVAL_MATRIX_BACKENDS`, and `EVAL_GATE_MIN_MEAN_RECALL_AT_K`.
+All four eval make targets are non-interactive and pass `--skip-markdown-report` by default. Override defaults with make variables like `EVAL_FIXTURES_DIR`, `EVAL_NAMESPACE_PREFIX`, `EVAL_SMOKE_PROVIDERS`, `EVAL_MATRIX_BACKENDS`, and `EVAL_GATE_MIN_MEAN_RECALL_AT_K`.
+
+When markdown reporting is enabled, retrieval eval reports are written under `docs/evals/runs/` with `docs/evals/Eval-Index.md`, and token-savings reports are written under `docs/evals/savings-runs/` with `docs/evals/Savings-Index.md`.
 
 Deterministic local baseline thresholds are persisted in `docs/evals/thresholds.stub` with accompanying run evidence in `docs/evals/Eval-Threshold-Baseline.md`.
 

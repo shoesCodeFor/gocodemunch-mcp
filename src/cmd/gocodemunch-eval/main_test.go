@@ -310,6 +310,242 @@ func TestRunWithArgsTokenSavingsSmokeEmitsSavingsReport(t *testing.T) {
 	}
 }
 
+func TestRunWithArgsTokenSavingsSmokeWritesMarkdownReportWithFrontMatter(t *testing.T) {
+	fixturesDir := writeTokenSavingsMarkdownFixtures(t)
+
+	restore := overrideEvalRunnerHooks(
+		tokenSavingsTestLoadConfigFn(),
+		createBackendFn,
+		createEmbedderFn,
+		closeBackendFn,
+		func() time.Time { return time.Date(2026, time.May, 1, 9, 30, 0, 0, time.UTC) },
+	)
+	defer restore()
+
+	reportDir := filepath.Join(t.TempDir(), "docs", "evals", "savings-runs")
+	outPath := filepath.Join(t.TempDir(), "outputs", "token-savings-smoke.json")
+	args := []string{
+		"--mode", "token-savings-smoke",
+		"--fixtures-dir", fixturesDir,
+		"--out", outPath,
+		"--markdown-report-dir", reportDir,
+		"--skip-markdown-report=false",
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runWithArgs(args, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected success exit code 0, got %d stderr=%s", code, stderr.String())
+	}
+
+	entries, err := os.ReadDir(reportDir)
+	if err != nil {
+		t.Fatalf("read token savings markdown report directory: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one token savings markdown report file, got %d", len(entries))
+	}
+	if got := entries[0].Name(); got != "20260501-093000z-token-savings-markdown-test.md" {
+		t.Fatalf("unexpected token savings markdown report filename %q", got)
+	}
+
+	reportPath := filepath.Join(reportDir, entries[0].Name())
+	contentBytes, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("read token savings markdown report: %v", err)
+	}
+	content := string(contentBytes)
+
+	for _, expected := range []string{
+		"type: report",
+		"title: Token Savings Run token-savings-markdown-test 2026-05-01T09:30:00Z",
+		"created: 2026-05-01",
+		"- competitor-amp",
+		"- competitor-claude-code",
+		"- competitor-codex",
+		"- '[[Eval-Index]]'",
+		"- '[[Savings-Index]]'",
+		"- '[[token-savings-smoke]]'",
+		"- JSON Artifact: `" + outPath + "`",
+		"- Indexed Repo: `token-savings-token-savings-markdown-test`",
+		"| with_mcp |",
+		"| claude_code |",
+		"| search-timeout-default | search_text |",
+	} {
+		if !strings.Contains(content, expected) {
+			t.Fatalf("expected token savings markdown report to include %q\nfull report:\n%s", expected, content)
+		}
+	}
+
+	indexPath := filepath.Join(filepath.Dir(reportDir), tokenSavingsIndexFileName)
+	indexBytes, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatalf("read token savings index file: %v", err)
+	}
+	indexContent := string(indexBytes)
+	for _, expected := range []string{
+		"type: reference",
+		"title: Savings Index",
+		"created: 2026-05-01",
+		"- '[[Eval-Index]]'",
+		"- [[20260501-093000z-token-savings-markdown-test]]",
+	} {
+		if !strings.Contains(indexContent, expected) {
+			t.Fatalf("expected token savings index to include %q\nfull index:\n%s", expected, indexContent)
+		}
+	}
+}
+
+func TestWriteTokenSavingsIndexListsRunsNewestFirstAndDedupes(t *testing.T) {
+	baseDir := t.TempDir()
+	reportDir := filepath.Join(baseDir, "docs", "evals", "savings-runs")
+	if err := os.MkdirAll(reportDir, 0o755); err != nil {
+		t.Fatalf("create token savings report dir: %v", err)
+	}
+
+	firstReportPath := filepath.Join(reportDir, "20260427-093000z-token-savings-markdown-test.md")
+	if _, err := writeTokenSavingsIndex(reportDir, firstReportPath, "2026-04-27T09:30:00Z"); err != nil {
+		t.Fatalf("write first token savings index: %v", err)
+	}
+
+	secondReportPath := filepath.Join(reportDir, "20260428-100000z-token-savings-markdown-test.md")
+	if _, err := writeTokenSavingsIndex(reportDir, secondReportPath, "2026-04-28T10:00:00Z"); err != nil {
+		t.Fatalf("write second token savings index: %v", err)
+	}
+
+	if _, err := writeTokenSavingsIndex(reportDir, secondReportPath, "2026-04-28T10:00:00Z"); err != nil {
+		t.Fatalf("write duplicate token savings index entry: %v", err)
+	}
+
+	indexPath := filepath.Join(baseDir, "docs", "evals", tokenSavingsIndexFileName)
+	indexBytes, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatalf("read token savings index file: %v", err)
+	}
+
+	lines := strings.Split(string(indexBytes), "\n")
+	runLines := make([]string, 0, 2)
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- [[20") {
+			runLines = append(runLines, trimmed)
+		}
+	}
+
+	expectedRunLines := []string{
+		"- [[20260428-100000z-token-savings-markdown-test]]",
+		"- [[20260427-093000z-token-savings-markdown-test]]",
+	}
+	if len(runLines) != len(expectedRunLines) {
+		t.Fatalf("expected %d token savings run links, got %d\nfull index:\n%s", len(expectedRunLines), len(runLines), string(indexBytes))
+	}
+	for i := range expectedRunLines {
+		if runLines[i] != expectedRunLines[i] {
+			t.Fatalf("unexpected token savings run link order at index %d: got %q want %q\nfull index:\n%s", i, runLines[i], expectedRunLines[i], string(indexBytes))
+		}
+	}
+}
+
+func TestRunWithArgsTokenSavingsSmokeReportOutputDeterminism(t *testing.T) {
+	fixturesDir := writeTokenSavingsMarkdownFixtures(t)
+
+	restore := overrideEvalRunnerHooks(
+		tokenSavingsTestLoadConfigFn(),
+		createBackendFn,
+		createEmbedderFn,
+		closeBackendFn,
+		func() time.Time { return time.Date(2026, time.May, 1, 9, 30, 0, 0, time.UTC) },
+	)
+	defer restore()
+
+	reportDir := filepath.Join(t.TempDir(), "docs", "evals", "savings-runs")
+	outPath := filepath.Join(t.TempDir(), "outputs", "token-savings-smoke.json")
+	args := []string{
+		"--mode", "token-savings-smoke",
+		"--fixtures-dir", fixturesDir,
+		"--out", outPath,
+		"--markdown-report-dir", reportDir,
+		"--skip-markdown-report=false",
+	}
+
+	var stdoutRun1 bytes.Buffer
+	var stderrRun1 bytes.Buffer
+	codeRun1 := runWithArgs(args, &stdoutRun1, &stderrRun1)
+	if codeRun1 != 0 {
+		t.Fatalf("expected first token savings run success, got code=%d stderr=%s", codeRun1, stderrRun1.String())
+	}
+
+	reportRun1 := tokenSavingsSmokeReport{}
+	if err := json.Unmarshal(stdoutRun1.Bytes(), &reportRun1); err != nil {
+		t.Fatalf("decode first token savings report json: %v output=%s", err, stdoutRun1.String())
+	}
+
+	reportFileName := "20260501-093000z-token-savings-markdown-test.md"
+	reportPath := filepath.Join(reportDir, reportFileName)
+	contentRun1, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("read first token savings markdown report: %v", err)
+	}
+
+	indexPath := filepath.Join(filepath.Dir(reportDir), tokenSavingsIndexFileName)
+	indexRun1, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatalf("read token savings index after first run: %v", err)
+	}
+
+	var stdoutRun2 bytes.Buffer
+	var stderrRun2 bytes.Buffer
+	codeRun2 := runWithArgs(args, &stdoutRun2, &stderrRun2)
+	if codeRun2 != 0 {
+		t.Fatalf("expected second token savings run success, got code=%d stderr=%s", codeRun2, stderrRun2.String())
+	}
+
+	reportRun2 := tokenSavingsSmokeReport{}
+	if err := json.Unmarshal(stdoutRun2.Bytes(), &reportRun2); err != nil {
+		t.Fatalf("decode second token savings report json: %v output=%s", err, stdoutRun2.String())
+	}
+	if !reflect.DeepEqual(reportRun1, reportRun2) {
+		t.Fatalf(
+			"expected deterministic token savings report content across repeated runs\nrun1=%#v\nrun2=%#v",
+			reportRun1,
+			reportRun2,
+		)
+	}
+
+	entries, err := os.ReadDir(reportDir)
+	if err != nil {
+		t.Fatalf("read token savings markdown report directory: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one deterministic token savings markdown report file after repeated runs, got %d", len(entries))
+	}
+	if got := entries[0].Name(); got != reportFileName {
+		t.Fatalf("unexpected token savings markdown report filename %q", got)
+	}
+
+	contentRun2, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("read second token savings markdown report: %v", err)
+	}
+	if string(contentRun1) != string(contentRun2) {
+		t.Fatalf("expected stable token savings markdown report content across repeated runs\nrun1:\n%s\nrun2:\n%s", string(contentRun1), string(contentRun2))
+	}
+
+	indexRun2, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatalf("read token savings index after second run: %v", err)
+	}
+	if string(indexRun1) != string(indexRun2) {
+		t.Fatalf("expected stable token savings index content across repeated runs\nrun1:\n%s\nrun2:\n%s", string(indexRun1), string(indexRun2))
+	}
+
+	runLink := "[[20260501-093000z-token-savings-markdown-test]]"
+	if strings.Count(string(indexRun2), runLink) != 1 {
+		t.Fatalf("expected token savings index to contain deterministic run link exactly once, index:\n%s", string(indexRun2))
+	}
+}
+
 func TestRunWithArgsRejectsUnsupportedMode(t *testing.T) {
 	restore := overrideEvalRunnerHooks(
 		func() (config.Config, error) {
@@ -1001,6 +1237,57 @@ func writeTokenSavingsFixtures(
 	writeJSONFile(t, filepath.Join(dir, "corpus.json"), corpus)
 	writeJSONFile(t, filepath.Join(dir, tokenSavingsPromptSuiteFileName), suite)
 	return dir
+}
+
+func writeTokenSavingsMarkdownFixtures(t *testing.T) string {
+	t.Helper()
+
+	return writeTokenSavingsFixtures(t, fixtureCorpus{
+		Dataset: "token-savings-markdown-test",
+		Documents: []fixtureDocument{
+			{
+				ID:       "pkg-config",
+				Path:     "pkg/config.py",
+				Language: "python",
+				Text:     "DEFAULT_TIMEOUT_SECONDS = 5\n\ndef load_timeout() -> int:\n    return DEFAULT_TIMEOUT_SECONDS\n",
+			},
+			{
+				ID:       "app-main",
+				Path:     "app/main.py",
+				Language: "python",
+				Text:     "from pkg.config import load_timeout\n\ndef run() -> int:\n    return load_timeout()\n",
+			},
+		},
+	}, tokenSavingsPromptSuiteFile{
+		Dataset:      "token-savings-markdown-test",
+		SuiteVersion: "v-markdown",
+		Cases: []tokenSavingsCaseFixture{
+			{
+				ID:     "search-timeout-default",
+				Prompt: "Find where the default timeout constant is defined.",
+				Tool:   "search_text",
+				Arguments: map[string]any{
+					"query":         "DEFAULT_TIMEOUT_SECONDS",
+					"context_lines": 1,
+					"max_results":   5,
+				},
+				ContextFiles: []string{"pkg/config.py", "app/main.py"},
+			},
+		},
+	})
+}
+
+func tokenSavingsTestLoadConfigFn() func() (config.Config, error) {
+	return func() (config.Config, error) {
+		return config.Config{
+			Disabled: map[string]struct{}{},
+			SavingsCompetitorPricing: map[string]config.SavingsCompetitorPricing{
+				"claude_code": {InputUSDPerMTok: 3.0, OutputUSDPerMTok: 15.0},
+				"codex":       {InputUSDPerMTok: 1.5, OutputUSDPerMTok: 6.0},
+				"amp":         {InputUSDPerMTok: 1.5, OutputUSDPerMTok: 6.0},
+			},
+		}, nil
+	}
 }
 
 func setEvalRunnerIntegrationEnv(t *testing.T, ollamaBaseURL string, storagePath string) {
