@@ -2691,17 +2691,36 @@ func TestAdvancedAnalysisToolContracts(t *testing.T) {
 	}
 
 	sessionStats := toolPayload(t, responses[16])
-	if got := intField(sessionStats, "session_tokens_saved"); got != 0 {
-		t.Fatalf("expected zero session_tokens_saved in parity stats stub: %#v", sessionStats)
+	if got := intField(sessionStats, "session_tokens_saved"); got <= 0 {
+		t.Fatalf("expected positive session_tokens_saved from live telemetry: %#v", sessionStats)
 	}
-	if got := intField(sessionStats, "total_tokens_saved"); got != 0 {
-		t.Fatalf("expected zero total_tokens_saved in parity stats stub: %#v", sessionStats)
+	if got := intField(sessionStats, "total_tokens_saved"); got <= 0 {
+		t.Fatalf("expected positive total_tokens_saved from live telemetry: %#v", sessionStats)
 	}
-	if _, ok := mapField(sessionStats, "session_cost_avoided")["gpt5_latest"]; !ok {
-		t.Fatalf("expected gpt5_latest in session_cost_avoided: %#v", sessionStats)
+	if got := intField(sessionStats, "session_calls"); got <= 0 {
+		t.Fatalf("expected positive session_calls from live telemetry: %#v", sessionStats)
 	}
-	if _, ok := sessionStats["_meta"]; !ok {
+	sessionCost := mapField(sessionStats, "session_cost_avoided")
+	for _, competitor := range []string{"claude_code", "codex", "amp"} {
+		if _, ok := sessionCost[competitor]; !ok {
+			t.Fatalf("expected %s in session_cost_avoided: %#v", competitor, sessionStats)
+		}
+	}
+	totalCost := mapField(sessionStats, "total_cost_avoided")
+	for _, competitor := range []string{"claude_code", "codex", "amp"} {
+		if _, ok := totalCost[competitor]; !ok {
+			t.Fatalf("expected %s in total_cost_avoided: %#v", competitor, sessionStats)
+		}
+	}
+	meta, ok := sessionStats["_meta"].(map[string]any)
+	if !ok {
 		t.Fatalf("expected server-level _meta envelope on get_session_stats: %#v", sessionStats)
+	}
+	if got := intField(meta, "tokens_saved"); got <= 0 {
+		t.Fatalf("expected positive _meta.tokens_saved on get_session_stats: %#v", sessionStats)
+	}
+	if got := intField(meta, "total_tokens_saved"); got <= 0 {
+		t.Fatalf("expected positive _meta.total_tokens_saved on get_session_stats: %#v", sessionStats)
 	}
 
 	blastRadius := toolPayload(t, responses[17])

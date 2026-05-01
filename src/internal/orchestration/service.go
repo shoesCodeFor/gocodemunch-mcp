@@ -110,6 +110,7 @@ func (s *Service) CallTool(ctx context.Context, name string, arguments map[strin
 		return map[string]any{"error": fmt.Sprintf("Input validation error: %s", err.Error())}
 	}
 
+	startedAt := time.Now().UTC()
 	callCtx, cancel := s.newRequestContext(ctx)
 	defer cancel()
 
@@ -136,6 +137,11 @@ func (s *Service) CallTool(ctx context.Context, name string, arguments map[strin
 	}
 
 	s.attachFreshnessMeta(callCtx, name, coerced, payload)
+	callSnapshot, sessionSnapshot, cumulativeSnapshot := s.recordTelemetry(name, coerced, payload, startedAt)
+	payload = s.applySavingsMeta(payload, callSnapshot, cumulativeSnapshot)
+	if name == "get_session_stats" {
+		payload = s.applySessionStatsPayload(payload, sessionSnapshot, cumulativeSnapshot)
+	}
 
 	return s.applyMetaPolicy(payload)
 }

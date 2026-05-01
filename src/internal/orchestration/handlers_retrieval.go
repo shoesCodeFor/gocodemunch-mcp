@@ -1684,16 +1684,14 @@ func (s *Service) handleGetSymbolSource(ctx context.Context, arguments map[strin
 }
 
 func (s *Service) handleGetSessionStats(_ context.Context, _ map[string]any) (map[string]any, error) {
-	sessionCost := zeroCostAvoidedMap()
-	return map[string]any{
-		"session_tokens_saved": 0,
-		"session_calls":        0,
-		"session_duration_s":   0.0,
-		"total_tokens_saved":   0,
-		"tool_breakdown":       map[string]any{},
-		"session_cost_avoided": sessionCost,
-		"total_cost_avoided":   zeroCostAvoidedMap(),
-	}, nil
+	session := s.zeroSessionSnapshot()
+	cumulative := s.zeroCumulativeSnapshot()
+	if s.deps.Telemetry != nil {
+		session = s.normalizeSessionSnapshot(s.deps.Telemetry.SessionSnapshot())
+		cumulative = s.normalizeCumulativeSnapshot(s.deps.Telemetry.CumulativeSnapshot())
+	}
+
+	return s.applySessionStatsPayload(nil, session, cumulative), nil
 }
 
 func (s *Service) handleGetDependencyGraph(ctx context.Context, arguments map[string]any) (map[string]any, error) {
@@ -5060,15 +5058,6 @@ func clampInt(value, minValue, maxValue int) int {
 		return maxValue
 	}
 	return value
-}
-
-func zeroCostAvoidedMap() map[string]any {
-	return map[string]any{
-		"claude_opus_4_6":   0.0,
-		"claude_sonnet_4_6": 0.0,
-		"claude_haiku_4_5":  0.0,
-		"gpt5_latest":       0.0,
-	}
 }
 
 func buildDependencyAdjacency(records []importRecord) map[string][]string {

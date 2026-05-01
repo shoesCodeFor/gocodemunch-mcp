@@ -16,10 +16,11 @@ This phase delivers a fully autonomous vertical slice: the MCP runtime estimates
   - Persist cumulative snapshots periodically (time-based) and at graceful shutdown points used in current server/CLI flows.
   - Completed in loop `00001`: added `src/internal/telemetry` tracker/runtime primitives for per-call, per-tool, per-session, and cumulative savings metrics; added `src/internal/storage/sqlite_telemetry_store.go` with WAL/busy-retry snapshot persistence; and wired server/CLI shutdown via `Service.Close()` / `Server.Close()` so telemetry flushes on exit as well as on periodic cadence.
 
-- [ ] Wire runtime instrumentation into orchestration and replace the `get_session_stats` stub:
+- [x] Wire runtime instrumentation into orchestration and replace the `get_session_stats` stub:
   - Reuse `Service.CallTool` flow in `src/internal/orchestration/service.go` to capture call start/end, request/response size estimates, and MCP savings deltas without changing tool-specific business logic.
   - Update `src/internal/orchestration/handlers_retrieval.go` so `get_session_stats` returns real session + cumulative stats and competitor cost-avoided maps for Claude Code, Codex, and Amp.
   - Populate `_meta.tokens_saved` and `_meta.total_tokens_saved` with real values while preserving existing response envelope compatibility.
+  - Completed in loop `00001`: added centralized successful-call telemetry instrumentation in `src/internal/orchestration/service.go` plus `src/internal/orchestration/service_telemetry.go`, replaced the `get_session_stats` stub with live session/cumulative snapshots keyed by `claude_code`, `codex`, and `amp`, and added orchestration + stdio integration coverage in `src/internal/orchestration/service_telemetry_test.go` and `tests-go/indexing_tools_test.go`.
 
 - [ ] Build an autonomous token-savings smoke benchmark path in the eval CLI:
   - Reuse `src/cmd/gocodemunch-eval/main.go` matrix/report flow to add a `token-savings-smoke` mode that runs a fixed prompt suite in both `with_mcp` and `without_mcp` modes.
