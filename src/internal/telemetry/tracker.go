@@ -92,6 +92,12 @@ type PersistedCumulativeSnapshot struct {
 	Cumulative CumulativeSnapshot `json:"cumulative"`
 }
 
+// PersistedCallEvent captures one persisted per-call telemetry event row.
+type PersistedCallEvent struct {
+	CapturedAt time.Time    `json:"captured_at"`
+	Call       CallSnapshot `json:"call"`
+}
+
 // Collector is the runtime-facing telemetry contract.
 type Collector interface {
 	RecordCall(record CallRecord) CallSnapshot

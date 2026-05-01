@@ -9,10 +9,17 @@ import (
 
 var ErrSnapshotNotFound = errors.New("telemetry snapshot not found")
 
+const defaultMaxPendingCallEvents = 2048
+
 // SnapshotStore persists cumulative telemetry snapshots.
 type SnapshotStore interface {
 	LoadLatestSnapshot(ctx context.Context) (PersistedCumulativeSnapshot, error)
 	SaveSnapshot(ctx context.Context, snapshot PersistedCumulativeSnapshot) error
+}
+
+// CallEventStore persists per-call telemetry history.
+type CallEventStore interface {
+	SaveCallEvents(ctx context.Context, events []PersistedCallEvent) error
 }
 
 // RuntimeConfig configures tracker persistence behavior.
@@ -28,15 +35,18 @@ type Runtime struct {
 	tracker *Tracker
 	store   SnapshotStore
 	now     func() time.Time
+	events  CallEventStore
 
 	flushMu sync.Mutex
 	stateMu sync.Mutex
 
-	interval     time.Duration
-	cancel       context.CancelFunc
-	done         chan struct{}
-	hasPersisted bool
-	lastRevision uint64
+	interval             time.Duration
+	cancel               context.CancelFunc
+	done                 chan struct{}
+	hasPersisted         bool
+	lastRevision         uint64
+	pendingCallEvents    []PersistedCallEvent
+	maxPendingCallEvents int
 
 	closeOnce sync.Once
 	closeErr  error
@@ -50,10 +60,14 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 	}
 
 	runtime := &Runtime{
-		tracker:  NewTracker(cfg.Pricing, now),
-		store:    cfg.Store,
-		now:      now,
-		interval: cfg.SnapshotInterval,
+		tracker:              NewTracker(cfg.Pricing, now),
+		store:                cfg.Store,
+		now:                  now,
+		interval:             cfg.SnapshotInterval,
+		maxPendingCallEvents: defaultMaxPendingCallEvents,
+	}
+	if eventStore, ok := cfg.Store.(CallEventStore); ok {
+		runtime.events = eventStore
 	}
 
 	if cfg.Store != nil {
@@ -89,7 +103,10 @@ func (r *Runtime) RecordCall(record CallRecord) CallSnapshot {
 	if r == nil || r.tracker == nil {
 		return CallSnapshot{}
 	}
-	return r.tracker.RecordCall(record)
+
+	call := r.tracker.RecordCall(record)
+	r.enqueueCallEvent(call)
+	return call
 }
 
 // SessionSnapshot delegates to the underlying tracker.
@@ -122,7 +139,20 @@ func (r *Runtime) Flush(ctx context.Context) error {
 	r.stateMu.Lock()
 	hasPersisted := r.hasPersisted
 	lastRevision := r.lastRevision
+	pendingCallEvents := append([]PersistedCallEvent(nil), r.pendingCallEvents...)
+	r.pendingCallEvents = nil
 	r.stateMu.Unlock()
+
+	if len(pendingCallEvents) == 0 && hasPersisted && revision == lastRevision {
+		return nil
+	}
+
+	if len(pendingCallEvents) > 0 && r.events != nil {
+		if err := r.events.SaveCallEvents(ctx, pendingCallEvents); err != nil {
+			r.requeueCallEvents(pendingCallEvents)
+			return err
+		}
+	}
 
 	if hasPersisted && revision == lastRevision {
 		return nil
@@ -160,6 +190,47 @@ func (r *Runtime) Close() error {
 	})
 
 	return r.closeErr
+}
+
+func (r *Runtime) enqueueCallEvent(call CallSnapshot) {
+	if r == nil || r.events == nil {
+		return
+	}
+
+	event := PersistedCallEvent{
+		CapturedAt: call.FinishedAt.UTC(),
+		Call:       call,
+	}
+	if event.CapturedAt.IsZero() {
+		event.CapturedAt = r.now().UTC()
+	}
+
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
+
+	r.pendingCallEvents = append(r.pendingCallEvents, event)
+	if overflow := len(r.pendingCallEvents) - r.maxPendingCallEvents; overflow > 0 {
+		// Bound in-memory growth if persistence is degraded; cumulative snapshots
+		// still preserve long-range totals even when the oldest pending events roll off.
+		r.pendingCallEvents = append([]PersistedCallEvent(nil), r.pendingCallEvents[overflow:]...)
+	}
+}
+
+func (r *Runtime) requeueCallEvents(events []PersistedCallEvent) {
+	if r == nil || len(events) == 0 {
+		return
+	}
+
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
+
+	merged := make([]PersistedCallEvent, 0, len(events)+len(r.pendingCallEvents))
+	merged = append(merged, events...)
+	merged = append(merged, r.pendingCallEvents...)
+	if overflow := len(merged) - r.maxPendingCallEvents; overflow > 0 {
+		merged = append([]PersistedCallEvent(nil), merged[overflow:]...)
+	}
+	r.pendingCallEvents = merged
 }
 
 func (r *Runtime) run(ctx context.Context) {

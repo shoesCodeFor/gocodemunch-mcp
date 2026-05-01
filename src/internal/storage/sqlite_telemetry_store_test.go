@@ -2,6 +2,8 @@ package storage
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"testing"
@@ -232,5 +234,224 @@ func TestSQLiteTelemetryStorePersistsPeriodicRuntimeSnapshots(t *testing.T) {
 	}
 	if loaded.CapturedAt.IsZero() {
 		t.Fatalf("expected persisted periodic snapshot captured_at to be populated, got %#v", loaded)
+	}
+}
+
+func TestSQLiteTelemetryStoreMigratesLegacySnapshotOnlySchema(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewSQLiteTelemetryStore(root)
+	if err != nil {
+		t.Fatalf("create telemetry store: %v", err)
+	}
+
+	legacyDB, err := sql.Open("sqlite", store.DBPath())
+	if err != nil {
+		t.Fatalf("open legacy telemetry db: %v", err)
+	}
+
+	legacyStatements := []string{
+		`CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)`,
+		`CREATE TABLE cumulative_snapshots (
+			snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+			captured_at TEXT NOT NULL,
+			payload TEXT NOT NULL
+		)`,
+	}
+	for _, statement := range legacyStatements {
+		if _, err := legacyDB.Exec(statement); err != nil {
+			t.Fatalf("seed legacy telemetry schema: %v", err)
+		}
+	}
+
+	expected := telemetry.PersistedCumulativeSnapshot{
+		CapturedAt: time.Date(2026, 5, 1, 15, 0, 0, 0, time.UTC),
+		Cumulative: telemetry.CumulativeSnapshot{
+			FirstRecordedAt:   time.Date(2026, 5, 1, 14, 0, 0, 0, time.UTC),
+			LastRecordedAt:    time.Date(2026, 5, 1, 15, 0, 0, 0, time.UTC),
+			SessionCount:      2,
+			CallCount:         4,
+			RequestTokens:     120,
+			ResponseTokens:    30,
+			TotalTokens:       150,
+			InputTokensSaved:  20,
+			OutputTokensSaved: 10,
+			TokensSaved:       30,
+			CostAvoidedUSD:    map[string]float64{"codex": 0.00009},
+			ToolBreakdown: map[string]telemetry.ToolSnapshot{
+				"search_text": {
+					CallCount:      4,
+					RequestTokens:  120,
+					ResponseTokens: 30,
+					TotalTokens:    150,
+					TokensSaved:    30,
+					CostAvoidedUSD: map[string]float64{"codex": 0.00009},
+				},
+			},
+		},
+	}
+	payload, err := json.Marshal(expected)
+	if err != nil {
+		t.Fatalf("marshal legacy telemetry payload: %v", err)
+	}
+	if _, err := legacyDB.Exec(
+		`INSERT INTO cumulative_snapshots(captured_at, payload) VALUES(?, ?)`,
+		expected.CapturedAt.Format(time.RFC3339Nano),
+		string(payload),
+	); err != nil {
+		t.Fatalf("insert legacy telemetry snapshot: %v", err)
+	}
+	if err := legacyDB.Close(); err != nil {
+		t.Fatalf("close legacy telemetry db: %v", err)
+	}
+
+	loaded, err := store.LoadLatestSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("load migrated telemetry snapshot: %v", err)
+	}
+	if loaded.CapturedAt != expected.CapturedAt {
+		t.Fatalf("expected migrated captured_at %s, got %#v", expected.CapturedAt, loaded)
+	}
+	if loaded.Cumulative.CallCount != expected.Cumulative.CallCount ||
+		loaded.Cumulative.TokensSaved != expected.Cumulative.TokensSaved {
+		t.Fatalf("unexpected migrated cumulative snapshot: %#v", loaded.Cumulative)
+	}
+
+	migratedDB, err := store.openDB()
+	if err != nil {
+		t.Fatalf("reopen migrated telemetry db: %v", err)
+	}
+	defer migratedDB.Close()
+
+	var schemaVersion string
+	if err := migratedDB.QueryRow(
+		`SELECT value FROM meta WHERE key = 'schema_version'`,
+	).Scan(&schemaVersion); err != nil {
+		t.Fatalf("read migrated schema version: %v", err)
+	}
+	if schemaVersion != "2" {
+		t.Fatalf("expected schema_version 2 after migration, got %q", schemaVersion)
+	}
+
+	var callEventTableCount int
+	if err := migratedDB.QueryRow(
+		`SELECT COUNT(1) FROM sqlite_master WHERE type = 'table' AND name = 'call_events'`,
+	).Scan(&callEventTableCount); err != nil {
+		t.Fatalf("probe migrated call_events table: %v", err)
+	}
+	if callEventTableCount != 1 {
+		t.Fatalf("expected migrated call_events table to exist, got count %d", callEventTableCount)
+	}
+}
+
+func TestSQLiteTelemetryStoreCallEventRetentionPreservesSnapshots(t *testing.T) {
+	now := time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
+	store, err := NewSQLiteTelemetryStoreWithOptions(t.TempDir(), SQLiteTelemetryStoreOptions{
+		CallEventRetention: 24 * time.Hour,
+		Now:                func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("create telemetry store: %v", err)
+	}
+
+	oldSnapshot := telemetry.PersistedCumulativeSnapshot{
+		CapturedAt: now.Add(-72 * time.Hour),
+		Cumulative: telemetry.CumulativeSnapshot{
+			SessionCount: 1,
+			CallCount:    1,
+			TokensSaved:  6,
+			ToolBreakdown: map[string]telemetry.ToolSnapshot{
+				"search_text": {CallCount: 1, TokensSaved: 6},
+			},
+		},
+	}
+	latestSnapshot := telemetry.PersistedCumulativeSnapshot{
+		CapturedAt: now.Add(-time.Hour),
+		Cumulative: telemetry.CumulativeSnapshot{
+			SessionCount: 2,
+			CallCount:    2,
+			TokensSaved:  14,
+			ToolBreakdown: map[string]telemetry.ToolSnapshot{
+				"search_text": {CallCount: 2, TokensSaved: 14},
+			},
+		},
+	}
+	if err := store.SaveSnapshot(context.Background(), oldSnapshot); err != nil {
+		t.Fatalf("save old snapshot: %v", err)
+	}
+	if err := store.SaveSnapshot(context.Background(), latestSnapshot); err != nil {
+		t.Fatalf("save latest snapshot: %v", err)
+	}
+
+	if err := store.SaveCallEvents(context.Background(), []telemetry.PersistedCallEvent{
+		{
+			CapturedAt: now.Add(-72 * time.Hour),
+			Call: telemetry.CallSnapshot{
+				ToolName:          "stale_tool",
+				StartedAt:         now.Add(-72*time.Hour - time.Second),
+				FinishedAt:        now.Add(-72 * time.Hour),
+				RequestTokens:     10,
+				ResponseTokens:    5,
+				TotalTokens:       15,
+				InputTokensSaved:  4,
+				OutputTokensSaved: 2,
+				TokensSaved:       6,
+				CostAvoidedUSD:    map[string]float64{"codex": 0.000015},
+			},
+		},
+		{
+			CapturedAt: now.Add(-time.Hour),
+			Call: telemetry.CallSnapshot{
+				ToolName:          "fresh_tool",
+				StartedAt:         now.Add(-time.Hour - time.Second),
+				FinishedAt:        now.Add(-time.Hour),
+				RequestTokens:     15,
+				ResponseTokens:    8,
+				TotalTokens:       23,
+				InputTokensSaved:  6,
+				OutputTokensSaved: 3,
+				TokensSaved:       9,
+				CostAvoidedUSD:    map[string]float64{"codex": 0.0000225},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("save retained telemetry call events: %v", err)
+	}
+
+	loaded, err := store.LoadLatestSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("load latest snapshot after retention compaction: %v", err)
+	}
+	if loaded.CapturedAt != latestSnapshot.CapturedAt || loaded.Cumulative.CallCount != latestSnapshot.Cumulative.CallCount {
+		t.Fatalf("expected latest snapshot to survive retention compaction, got %#v", loaded)
+	}
+
+	db, err := store.openDB()
+	if err != nil {
+		t.Fatalf("open telemetry db for retention assertions: %v", err)
+	}
+	defer db.Close()
+
+	var snapshotCount int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM cumulative_snapshots`).Scan(&snapshotCount); err != nil {
+		t.Fatalf("count cumulative snapshots: %v", err)
+	}
+	if snapshotCount != 2 {
+		t.Fatalf("expected cumulative snapshot history to be preserved, got %d rows", snapshotCount)
+	}
+
+	var eventCount int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM call_events`).Scan(&eventCount); err != nil {
+		t.Fatalf("count retained call events: %v", err)
+	}
+	if eventCount != 1 {
+		t.Fatalf("expected exactly one retained call event, got %d", eventCount)
+	}
+
+	var retainedTool string
+	if err := db.QueryRow(`SELECT tool_name FROM call_events LIMIT 1`).Scan(&retainedTool); err != nil {
+		t.Fatalf("load retained call event tool: %v", err)
+	}
+	if retainedTool != "fresh_tool" {
+		t.Fatalf("expected stale event to be compacted away, retained tool=%q", retainedTool)
 	}
 }

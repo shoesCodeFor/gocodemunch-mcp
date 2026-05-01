@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"math"
 	"sync"
 	"testing"
@@ -334,12 +335,65 @@ func TestRuntimeRestoresPersistedCumulativeAndSkipsRedundantFlushes(t *testing.T
 	}
 }
 
+func TestRuntimeFlushPersistsCallEventsAndRequeuesOnFailure(t *testing.T) {
+	now := time.Date(2026, 5, 1, 18, 0, 0, 0, time.UTC)
+	store := &runtimeStoreStub{
+		eventErrs: []error{errors.New("sqlite unavailable")},
+	}
+
+	runtime, err := NewRuntime(RuntimeConfig{
+		Pricing: map[string]Pricing{
+			"codex": {InputUSDPerMTok: 1.5, OutputUSDPerMTok: 6},
+		},
+		Store: store,
+		Now:   func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("create runtime: %v", err)
+	}
+
+	runtime.RecordCall(CallRecord{
+		ToolName:          "get_context_bundle",
+		StartedAt:         now.Add(-20 * time.Millisecond),
+		FinishedAt:        now,
+		RequestTokens:     12,
+		ResponseTokens:    8,
+		InputTokensSaved:  4,
+		OutputTokensSaved: 3,
+	})
+
+	if err := runtime.Flush(context.Background()); err == nil {
+		t.Fatal("expected first flush to fail while call-event persistence is unavailable")
+	}
+	if saves := store.saveCount(); saves != 0 {
+		t.Fatalf("expected snapshot save to be skipped on call-event failure, got %d saves", saves)
+	}
+	if batches := store.eventBatchCount(); batches != 0 {
+		t.Fatalf("expected failed call-event batch not to be recorded, got %d batches", batches)
+	}
+
+	if err := runtime.Flush(context.Background()); err != nil {
+		t.Fatalf("retry flush after call-event failure: %v", err)
+	}
+	if saves := store.saveCount(); saves != 1 {
+		t.Fatalf("expected snapshot save after successful retry, got %d", saves)
+	}
+	if batches := store.eventBatchCount(); batches != 1 {
+		t.Fatalf("expected one persisted call-event batch after retry, got %d", batches)
+	}
+	if len(store.events[0]) != 1 || store.events[0][0].Call.ToolName != "get_context_bundle" {
+		t.Fatalf("unexpected persisted call-event batch after retry: %#v", store.events)
+	}
+}
+
 type runtimeStoreStub struct {
-	mu      sync.Mutex
-	load    PersistedCumulativeSnapshot
-	loadErr error
-	saves   []PersistedCumulativeSnapshot
-	saveCh  chan PersistedCumulativeSnapshot
+	mu        sync.Mutex
+	load      PersistedCumulativeSnapshot
+	loadErr   error
+	saves     []PersistedCumulativeSnapshot
+	saveCh    chan PersistedCumulativeSnapshot
+	events    [][]PersistedCallEvent
+	eventErrs []error
 }
 
 func (s *runtimeStoreStub) LoadLatestSnapshot(_ context.Context) (PersistedCumulativeSnapshot, error) {
@@ -366,10 +420,36 @@ func (s *runtimeStoreStub) SaveSnapshot(
 	return nil
 }
 
+func (s *runtimeStoreStub) SaveCallEvents(
+	_ context.Context,
+	events []PersistedCallEvent,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.eventErrs) > 0 {
+		err := s.eventErrs[0]
+		s.eventErrs = s.eventErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
+
+	batch := append([]PersistedCallEvent(nil), events...)
+	s.events = append(s.events, batch)
+	return nil
+}
+
 func (s *runtimeStoreStub) saveCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.saves)
+}
+
+func (s *runtimeStoreStub) eventBatchCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.events)
 }
 
 func almostEqual(left, right float64) bool {
