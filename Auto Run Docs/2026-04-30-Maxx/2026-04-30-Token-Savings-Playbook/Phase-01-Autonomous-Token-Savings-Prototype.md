@@ -10,10 +10,11 @@ This phase delivers a fully autonomous vertical slice: the MCP runtime estimates
   - Keep defaults deterministic and non-interactive so Phase 01 can run on a clean machine without manual decisions.
   - Completed in loop `00001`: added deterministic savings defaults and env validation/parsing in `src/internal/config/config.go` (telemetry toggle, snapshot interval, competitor pricing), plus coverage in `src/internal/config/config_test.go`.
 
-- [ ] Implement telemetry domain and periodic SQLite persistence for cumulative savings:
+- [x] Implement telemetry domain and periodic SQLite persistence for cumulative savings:
   - Create a focused telemetry package (or module) that tracks per-call, per-tool, per-session, and cumulative estimated token/cost metrics.
   - Reuse SQLite schema/init and retry patterns from `src/internal/storage/sqlite_store.go` for a new telemetry store, including schema creation and safe writes.
   - Persist cumulative snapshots periodically (time-based) and at graceful shutdown points used in current server/CLI flows.
+  - Completed in loop `00001`: added `src/internal/telemetry` tracker/runtime primitives for per-call, per-tool, per-session, and cumulative savings metrics; added `src/internal/storage/sqlite_telemetry_store.go` with WAL/busy-retry snapshot persistence; and wired server/CLI shutdown via `Service.Close()` / `Server.Close()` so telemetry flushes on exit as well as on periodic cadence.
 
 - [ ] Wire runtime instrumentation into orchestration and replace the `get_session_stats` stub:
   - Reuse `Service.CallTool` flow in `src/internal/orchestration/service.go` to capture call start/end, request/response size estimates, and MCP savings deltas without changing tool-specific business logic.

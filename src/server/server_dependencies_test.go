@@ -2,23 +2,31 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"io"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/config"
+	"github.com/jgravelle/gocodemunch-mcp/src/internal/storage"
 	vectorqdrant "github.com/jgravelle/gocodemunch-mcp/src/internal/storage/vector/qdrant"
 )
 
 func TestBuildDependenciesInjectsVectorBackendAndEmbedder(t *testing.T) {
 	cfg := config.Config{
-		StoragePath:          t.TempDir(),
-		VectorBackend:        "sqlite",
-		VectorTopK:           5,
-		VectorQueryTimeoutMS: 8000,
-		EmbeddingProvider:    "ollama",
-		EmbeddingModel:       "bge-m3",
-		OllamaBaseURL:        "http://localhost:11434",
+		StoragePath:               t.TempDir(),
+		VectorBackend:             "sqlite",
+		VectorTopK:                5,
+		VectorQueryTimeoutMS:      8000,
+		EmbeddingProvider:         "ollama",
+		EmbeddingModel:            "bge-m3",
+		OllamaBaseURL:             "http://localhost:11434",
+		SavingsTelemetryEnabled:   true,
+		SavingsSnapshotIntervalMS: 30000,
+		SavingsCompetitorPricing: map[string]config.SavingsCompetitorPricing{
+			"codex": {InputUSDPerMTok: 1.5, OutputUSDPerMTok: 6},
+		},
 	}
 
 	deps, err := buildDependencies(serverOptions{cfg: cfg})
@@ -37,7 +45,11 @@ func TestBuildDependenciesInjectsVectorBackendAndEmbedder(t *testing.T) {
 	if deps.IndexStore == nil {
 		t.Fatal("expected index store dependency to be injected")
 	}
+	if deps.Telemetry == nil {
+		t.Fatal("expected telemetry dependency to be injected")
+	}
 
+	closeIfPossible(deps.Telemetry)
 	closeIfPossible(deps.VectorBackend)
 }
 
@@ -130,4 +142,41 @@ func TestNewPanicsWhenVectorDependencyWiringFails(t *testing.T) {
 	}()
 
 	_ = New(bytes.NewBuffer(nil), io.Discard)
+}
+
+func TestServerCloseFlushesTelemetrySnapshot(t *testing.T) {
+	storagePath := t.TempDir()
+	t.Setenv("CODE_INDEX_PATH", storagePath)
+	t.Setenv("VECTOR_BACKEND", "sqlite")
+	t.Setenv("EMBEDDING_PROVIDER", "ollama")
+	t.Setenv("EMBEDDING_MODEL", "bge-m3")
+	t.Setenv("OLLAMA_BASE_URL", "http://localhost:11434")
+	t.Setenv("GOCODEMUNCH_SAVINGS_TELEMETRY_ENABLED", "true")
+	t.Setenv("GOCODEMUNCH_SAVINGS_SNAPSHOT_INTERVAL_MS", "60000")
+	t.Setenv("GOCODEMUNCH_SAVINGS_CODEX_INPUT_USD_PER_MTOK", "1.50")
+	t.Setenv("GOCODEMUNCH_SAVINGS_CODEX_OUTPUT_USD_PER_MTOK", "6.00")
+	t.Setenv("GOCODEMUNCH_SAVINGS_CLAUDE_CODE_INPUT_USD_PER_MTOK", "3.00")
+	t.Setenv("GOCODEMUNCH_SAVINGS_CLAUDE_CODE_OUTPUT_USD_PER_MTOK", "15.00")
+	t.Setenv("GOCODEMUNCH_SAVINGS_AMP_INPUT_USD_PER_MTOK", "1.50")
+	t.Setenv("GOCODEMUNCH_SAVINGS_AMP_OUTPUT_USD_PER_MTOK", "6.00")
+
+	srv := New(bytes.NewBuffer(nil), io.Discard)
+	if err := srv.Close(); err != nil {
+		t.Fatalf("close server: %v", err)
+	}
+
+	store, err := storage.NewSQLiteTelemetryStore(storagePath)
+	if err != nil {
+		t.Fatalf("create telemetry store: %v", err)
+	}
+	snapshot, err := store.LoadLatestSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("load latest telemetry snapshot after server close: %v", err)
+	}
+	if snapshot.Cumulative.CallCount != 0 || snapshot.Cumulative.SessionCount != 0 {
+		t.Fatalf("expected zeroed close snapshot for idle server, got %#v", snapshot)
+	}
+	if _, err := os.Stat(store.DBPath()); err != nil {
+		t.Fatalf("expected persisted telemetry db on close: %v", err)
+	}
 }

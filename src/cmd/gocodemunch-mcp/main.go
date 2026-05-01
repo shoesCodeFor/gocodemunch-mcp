@@ -92,6 +92,9 @@ func runWithArgs(args []string) int {
 	} else {
 		serveErr = mcpServer.Serve(ctx)
 	}
+	if closeErr := mcpServer.Close(); closeErr != nil {
+		serveErr = errors.Join(serveErr, closeErr)
+	}
 
 	if serveErr != nil && !errors.Is(serveErr, context.Canceled) {
 		fmt.Fprintf(os.Stderr, "server failed: %v\n", serveErr)

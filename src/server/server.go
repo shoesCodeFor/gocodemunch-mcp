@@ -2,9 +2,11 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/config"
@@ -14,6 +16,7 @@ import (
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/storage"
 	vectorqdrant "github.com/jgravelle/gocodemunch-mcp/src/internal/storage/vector/qdrant"
 	vectorsqlite "github.com/jgravelle/gocodemunch-mcp/src/internal/storage/vector/sqlite"
+	"github.com/jgravelle/gocodemunch-mcp/src/internal/telemetry"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/transport/mcp"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/watcher"
 )
@@ -60,6 +63,10 @@ func WithRepoAcquirer(acquirer indexing.RepoAcquirer) Option {
 type Server struct {
 	inner   *mcp.Server
 	service *orchestration.Service
+
+	vectorBackend any
+	closeOnce     sync.Once
+	closeErr      error
 }
 
 // New wires config, orchestration, and stdio transport.
@@ -78,8 +85,9 @@ func New(in io.Reader, out io.Writer, optionFns ...Option) *Server {
 
 	service := orchestration.New(opts.cfg, deps)
 	return &Server{
-		inner:   mcp.NewServer(in, out, service, opts.cfg),
-		service: service,
+		inner:         mcp.NewServer(in, out, service, opts.cfg),
+		service:       service,
+		vectorBackend: deps.VectorBackend,
 	}
 }
 
@@ -114,6 +122,13 @@ func buildDependencies(opts serverOptions) (orchestration.Dependencies, error) {
 		return deps, err
 	}
 	deps.Embedder = embedder
+
+	telemetryRuntime, err := buildTelemetryRuntime(opts.cfg)
+	if err != nil {
+		closeIfPossible(vectorBackend)
+		return deps, err
+	}
+	deps.Telemetry = telemetryRuntime
 
 	return deps, nil
 }
@@ -191,6 +206,40 @@ func buildEmbedder(cfg config.Config) (indexing.Embedder, error) {
 	}
 }
 
+func buildTelemetryRuntime(cfg config.Config) (*telemetry.Runtime, error) {
+	if !cfg.SavingsTelemetryEnabled {
+		return nil, nil
+	}
+
+	store, err := storage.NewSQLiteTelemetryStore(cfg.StoragePath)
+	if err != nil {
+		return nil, fmt.Errorf("initialize savings telemetry store: %w", err)
+	}
+
+	runtime, err := telemetry.NewRuntime(telemetry.RuntimeConfig{
+		Pricing:          telemetryPricing(cfg.SavingsCompetitorPricing),
+		Store:            store,
+		SnapshotInterval: time.Duration(cfg.SavingsSnapshotIntervalMS) * time.Millisecond,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("initialize savings telemetry runtime: %w", err)
+	}
+	return runtime, nil
+}
+
+func telemetryPricing(
+	pricing map[string]config.SavingsCompetitorPricing,
+) map[string]telemetry.Pricing {
+	converted := make(map[string]telemetry.Pricing, len(pricing))
+	for competitor, value := range pricing {
+		converted[competitor] = telemetry.Pricing{
+			InputUSDPerMTok:  value.InputUSDPerMTok,
+			OutputUSDPerMTok: value.OutputUSDPerMTok,
+		}
+	}
+	return converted
+}
+
 func closeIfPossible(candidate any) {
 	type closer interface {
 		Close() error
@@ -200,9 +249,34 @@ func closeIfPossible(candidate any) {
 	}
 }
 
+func closeWithError(candidate any) error {
+	type closer interface {
+		Close() error
+	}
+	if closable, ok := candidate.(closer); ok {
+		return closable.Close()
+	}
+	return nil
+}
+
 // Serve runs the MCP stdio loop until context cancellation or EOF.
 func (s *Server) Serve(ctx context.Context) error {
 	return s.inner.Serve(ctx)
+}
+
+// Close flushes runtime telemetry and closes closeable dependencies.
+func (s *Server) Close() error {
+	if s == nil {
+		return nil
+	}
+
+	s.closeOnce.Do(func() {
+		s.closeErr = errors.Join(
+			s.service.Close(),
+			closeWithError(s.vectorBackend),
+		)
+	})
+	return s.closeErr
 }
 
 // WatcherBatchProcessor exposes an index_folder-backed batch processor for

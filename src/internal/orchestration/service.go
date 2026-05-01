@@ -11,6 +11,7 @@ import (
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/domain/indexing"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/security"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/storage"
+	"github.com/jgravelle/gocodemunch-mcp/src/internal/telemetry"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/watcher"
 )
 
@@ -46,6 +47,7 @@ type Dependencies struct {
 	PathGuard       security.PathGuard
 	RegexGuard      security.RegexGuard
 	SecretFilter    security.SecretFilter
+	Telemetry       telemetry.Collector
 }
 
 // Service owns tool registration, validation, and call routing.
@@ -280,6 +282,21 @@ func (s *Service) applyMetaPolicy(payload map[string]any) map[string]any {
 
 	payload["_meta"] = filtered
 	return payload
+}
+
+// Close flushes service-owned lifecycle dependencies.
+func (s *Service) Close() error {
+	if s == nil {
+		return nil
+	}
+
+	type closer interface {
+		Close() error
+	}
+	if closable, ok := s.deps.Telemetry.(closer); ok {
+		return closable.Close()
+	}
+	return nil
 }
 
 func deepCopyMap(in map[string]any) map[string]any {
