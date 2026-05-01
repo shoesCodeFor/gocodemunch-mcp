@@ -24,10 +24,11 @@ type CallEventStore interface {
 
 // RuntimeConfig configures tracker persistence behavior.
 type RuntimeConfig struct {
-	Pricing          map[string]Pricing
-	Store            SnapshotStore
-	SnapshotInterval time.Duration
-	Now              func() time.Time
+	Pricing               map[string]Pricing
+	PricingProfileVersion string
+	Store                 SnapshotStore
+	SnapshotInterval      time.Duration
+	Now                   func() time.Time
 }
 
 // Runtime combines the in-memory tracker with periodic persistence.
@@ -37,6 +38,7 @@ type Runtime struct {
 	now     func() time.Time
 	events  CallEventStore
 	loader  CallEventLoader
+	version string
 
 	flushMu sync.Mutex
 	stateMu sync.Mutex
@@ -64,6 +66,7 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 		tracker:              NewTracker(cfg.Pricing, now),
 		store:                cfg.Store,
 		now:                  now,
+		version:              cfg.PricingProfileVersion,
 		interval:             cfg.SnapshotInterval,
 		maxPendingCallEvents: defaultMaxPendingCallEvents,
 	}
@@ -197,8 +200,9 @@ func (r *Runtime) Flush(ctx context.Context) error {
 	}
 
 	snapshot := PersistedCumulativeSnapshot{
-		CapturedAt: r.now().UTC(),
-		Cumulative: r.tracker.CumulativeSnapshot(),
+		CapturedAt:            r.now().UTC(),
+		PricingProfileVersion: r.version,
+		Cumulative:            r.tracker.CumulativeSnapshot(),
 	}
 	if err := r.store.SaveSnapshot(ctx, snapshot); err != nil {
 		return err
@@ -236,8 +240,9 @@ func (r *Runtime) enqueueCallEvent(call CallSnapshot) {
 	}
 
 	event := PersistedCallEvent{
-		CapturedAt: call.FinishedAt.UTC(),
-		Call:       call,
+		CapturedAt:            call.FinishedAt.UTC(),
+		PricingProfileVersion: r.version,
+		Call:                  call,
 	}
 	if event.CapturedAt.IsZero() {
 		event.CapturedAt = r.now().UTC()

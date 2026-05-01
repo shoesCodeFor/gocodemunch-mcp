@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/config"
+	"github.com/jgravelle/gocodemunch-mcp/src/internal/savings"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/storage"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/telemetry"
 )
@@ -306,7 +307,7 @@ func TestGetSessionStatsReturnsLiveSessionAndCumulativeTelemetry(t *testing.T) {
 
 	sessionCost := floatMapFromAny(t, stats["session_cost_avoided"])
 	totalCost := floatMapFromAny(t, stats["total_cost_avoided"])
-	for _, competitor := range defaultSavingsCompetitors {
+	for _, competitor := range savings.DefaultCompetitors() {
 		if _, ok := sessionCost[competitor]; !ok {
 			t.Fatalf("expected %q in session_cost_avoided: %#v", competitor, sessionCost)
 		}
@@ -384,7 +385,7 @@ func TestGetSessionStatsReturnsStableZeroContractWithoutTelemetry(t *testing.T) 
 
 	sessionCost := floatMapFromAny(t, stats["session_cost_avoided"])
 	totalCost := floatMapFromAny(t, stats["total_cost_avoided"])
-	for _, competitor := range defaultSavingsCompetitors {
+	for _, competitor := range savings.DefaultCompetitors() {
 		if sessionCost[competitor] != 0 {
 			t.Fatalf("expected zero session cost for %q without telemetry, got %#v", competitor, sessionCost)
 		}

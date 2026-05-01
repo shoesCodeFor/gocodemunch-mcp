@@ -208,9 +208,10 @@ func TestRuntimePersistsPeriodicallyAndOnClose(t *testing.T) {
 		Pricing: map[string]Pricing{
 			"codex": {InputUSDPerMTok: 1.5, OutputUSDPerMTok: 6},
 		},
-		Store:            store,
-		SnapshotInterval: 10 * time.Millisecond,
-		Now:              func() time.Time { return now },
+		PricingProfileVersion: "pricing-v2026-05-01",
+		Store:                 store,
+		SnapshotInterval:      10 * time.Millisecond,
+		Now:                   func() time.Time { return now },
 	})
 	if err != nil {
 		t.Fatalf("create runtime: %v", err)
@@ -220,6 +221,9 @@ func TestRuntimePersistsPeriodicallyAndOnClose(t *testing.T) {
 	case snapshot := <-store.saveCh:
 		if snapshot.Cumulative.CallCount != 0 {
 			t.Fatalf("expected initial periodic snapshot to be empty, got %#v", snapshot)
+		}
+		if snapshot.PricingProfileVersion != "pricing-v2026-05-01" {
+			t.Fatalf("expected pricing profile version on persisted snapshot, got %#v", snapshot)
 		}
 	case <-time.After(250 * time.Millisecond):
 		t.Fatal("expected periodic snapshot flush")
@@ -239,6 +243,9 @@ func TestRuntimePersistsPeriodicallyAndOnClose(t *testing.T) {
 	case snapshot := <-store.saveCh:
 		if snapshot.Cumulative.CallCount != 1 || snapshot.Cumulative.TokensSaved != 5 {
 			t.Fatalf("expected periodic snapshot with recorded call, got %#v", snapshot)
+		}
+		if snapshot.PricingProfileVersion != "pricing-v2026-05-01" {
+			t.Fatalf("expected pricing profile version on updated persisted snapshot, got %#v", snapshot)
 		}
 	case <-time.After(250 * time.Millisecond):
 		t.Fatal("expected periodic snapshot after call")
@@ -287,8 +294,9 @@ func TestRuntimeRestoresPersistedCumulativeAndSkipsRedundantFlushes(t *testing.T
 		Pricing: map[string]Pricing{
 			"codex": {InputUSDPerMTok: 1.5, OutputUSDPerMTok: 6},
 		},
-		Store: store,
-		Now:   func() time.Time { return now },
+		PricingProfileVersion: "pricing-v2026-05-01",
+		Store:                 store,
+		Now:                   func() time.Time { return now },
 	})
 	if err != nil {
 		t.Fatalf("create runtime: %v", err)
@@ -328,6 +336,9 @@ func TestRuntimeRestoresPersistedCumulativeAndSkipsRedundantFlushes(t *testing.T
 	if saves := store.saveCount(); saves != 2 {
 		t.Fatalf("expected changed revision to persist a second snapshot, got %d", saves)
 	}
+	if got := store.saves[len(store.saves)-1].PricingProfileVersion; got != "pricing-v2026-05-01" {
+		t.Fatalf("expected restored runtime flush to preserve pricing profile version, got %#v", store.saves)
+	}
 
 	updated := runtime.CumulativeSnapshot()
 	if updated.SessionCount != 3 || updated.CallCount != 5 || updated.TokensSaved != 47 {
@@ -345,8 +356,9 @@ func TestRuntimeFlushPersistsCallEventsAndRequeuesOnFailure(t *testing.T) {
 		Pricing: map[string]Pricing{
 			"codex": {InputUSDPerMTok: 1.5, OutputUSDPerMTok: 6},
 		},
-		Store: store,
-		Now:   func() time.Time { return now },
+		PricingProfileVersion: "pricing-v2026-05-01",
+		Store:                 store,
+		Now:                   func() time.Time { return now },
 	})
 	if err != nil {
 		t.Fatalf("create runtime: %v", err)
@@ -383,6 +395,9 @@ func TestRuntimeFlushPersistsCallEventsAndRequeuesOnFailure(t *testing.T) {
 	}
 	if len(store.events[0]) != 1 || store.events[0][0].Call.ToolName != "get_context_bundle" {
 		t.Fatalf("unexpected persisted call-event batch after retry: %#v", store.events)
+	}
+	if got := store.events[0][0].PricingProfileVersion; got != "pricing-v2026-05-01" {
+		t.Fatalf("expected persisted call event to include pricing profile version, got %#v", store.events)
 	}
 }
 
@@ -433,8 +448,9 @@ func TestRuntimeQueryTrendsAggregatesPersistedCallEvents(t *testing.T) {
 		Pricing: map[string]Pricing{
 			"codex": {InputUSDPerMTok: 1.5, OutputUSDPerMTok: 6},
 		},
-		Store: store,
-		Now:   func() time.Time { return now },
+		PricingProfileVersion: "pricing-v2026-05-01",
+		Store:                 store,
+		Now:                   func() time.Time { return now },
 	})
 	if err != nil {
 		t.Fatalf("create runtime: %v", err)

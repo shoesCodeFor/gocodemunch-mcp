@@ -14,6 +14,7 @@ import (
 
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/config"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/orchestration"
+	"github.com/jgravelle/gocodemunch-mcp/src/internal/savings"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/storage"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/telemetry"
 )
@@ -146,8 +147,8 @@ func runTokenSavingsSmokeMode(
 		return tokenSavingsSmokeReport{}, fmt.Errorf("create benchmark index store: %w", err)
 	}
 
-	pricing := cloneSavingsPricing(cfg.SavingsCompetitorPricing)
-	tracker := telemetry.NewTracker(tokenSavingsTelemetryPricing(pricing), nowUTCFn)
+	pricing, _ := savings.NormalizePricing(cfg.SavingsCompetitorPricing)
+	tracker := telemetry.NewTracker(telemetry.PricingFromSavings(pricing), nowUTCFn)
 
 	serviceCfg := cfg
 	serviceCfg.StoragePath = storagePath
@@ -218,19 +219,19 @@ func runTokenSavingsSmokeMode(
 			TotalTokens:        withInputTokens + withResponseTokens,
 			ToolRequestTokens:  withRequestTokens,
 			ToolResponseTokens: withResponseTokens,
-			CostUSD:            competitorCosts(pricing, withInputTokens, withResponseTokens),
+			CostUSD:            savings.CostsForTokens(pricing, withInputTokens, withResponseTokens),
 		}
 		withoutMode := tokenSavingsModeCaseMetrics{
 			InputTokens:   withoutInputTokens,
 			OutputTokens:  0,
 			TotalTokens:   withoutInputTokens,
 			ContextTokens: contextOnlyTokens,
-			CostUSD:       competitorCosts(pricing, withoutInputTokens, 0),
+			CostUSD:       savings.CostsForTokens(pricing, withoutInputTokens, 0),
 		}
 		savings := tokenSavingsDeltaReport{
 			TokensSaved:  withoutMode.TotalTokens - withMode.TotalTokens,
 			SavingsPct:   savingsRatio(withoutMode.TotalTokens, withoutMode.TotalTokens-withMode.TotalTokens),
-			CostSavedUSD: diffCostMap(withoutMode.CostUSD, withMode.CostUSD, pricing),
+			CostSavedUSD: savings.DiffCostMap(withoutMode.CostUSD, withMode.CostUSD, pricing),
 		}
 
 		caseReports = append(caseReports, tokenSavingsCaseReport{
@@ -253,13 +254,13 @@ func runTokenSavingsSmokeMode(
 		InputTokens:  totalWithInput,
 		OutputTokens: totalWithOutput,
 		TotalTokens:  totalWithInput + totalWithOutput,
-		CostUSD:      competitorCosts(pricing, totalWithInput, totalWithOutput),
+		CostUSD:      savings.CostsForTokens(pricing, totalWithInput, totalWithOutput),
 	}
 	aggregateWithout := tokenSavingsModeAggregateMetrics{
 		InputTokens:  totalWithoutInput,
 		OutputTokens: 0,
 		TotalTokens:  totalWithoutInput,
-		CostUSD:      competitorCosts(pricing, totalWithoutInput, 0),
+		CostUSD:      savings.CostsForTokens(pricing, totalWithoutInput, 0),
 	}
 
 	return tokenSavingsSmokeReport{
@@ -279,7 +280,7 @@ func runTokenSavingsSmokeMode(
 			Savings: tokenSavingsDeltaReport{
 				TokensSaved:  aggregateWithout.TotalTokens - aggregateWith.TotalTokens,
 				SavingsPct:   savingsRatio(aggregateWithout.TotalTokens, aggregateWithout.TotalTokens-aggregateWith.TotalTokens),
-				CostSavedUSD: diffCostMap(aggregateWithout.CostUSD, aggregateWith.CostUSD, pricing),
+				CostSavedUSD: savings.DiffCostMap(aggregateWithout.CostUSD, aggregateWith.CostUSD, pricing),
 			},
 		},
 	}, nil
@@ -457,66 +458,11 @@ func estimateSerializedTokensForReport(value any) int {
 	return int(math.Ceil(float64(len(encoded)) / serializedBytesPerEstimatedToken))
 }
 
-func tokenSavingsTelemetryPricing(
-	pricing map[string]config.SavingsCompetitorPricing,
-) map[string]telemetry.Pricing {
-	converted := make(map[string]telemetry.Pricing, len(pricing))
-	for competitor, rate := range pricing {
-		converted[competitor] = telemetry.Pricing{
-			InputUSDPerMTok:  rate.InputUSDPerMTok,
-			OutputUSDPerMTok: rate.OutputUSDPerMTok,
-		}
-	}
-	return converted
-}
-
-func cloneSavingsPricing(
-	pricing map[string]config.SavingsCompetitorPricing,
-) map[string]config.SavingsCompetitorPricing {
-	cloned := make(map[string]config.SavingsCompetitorPricing, len(pricing))
-	for competitor, value := range pricing {
-		cloned[competitor] = value
-	}
-	return cloned
-}
-
-func competitorCosts(
-	pricing map[string]config.SavingsCompetitorPricing,
-	inputTokens int,
-	outputTokens int,
-) map[string]float64 {
-	costs := make(map[string]float64, len(pricing))
-	for competitor, rate := range pricing {
-		inputCost := float64(inputTokens) * rate.InputUSDPerMTok / 1_000_000.0
-		outputCost := float64(outputTokens) * rate.OutputUSDPerMTok / 1_000_000.0
-		costs[competitor] = roundUSDForReport(
-			inputCost + outputCost,
-		)
-	}
-	return costs
-}
-
-func diffCostMap(
-	left map[string]float64,
-	right map[string]float64,
-	pricing map[string]config.SavingsCompetitorPricing,
-) map[string]float64 {
-	diff := make(map[string]float64, len(pricing))
-	for competitor := range pricing {
-		diff[competitor] = roundUSDForReport(left[competitor] - right[competitor])
-	}
-	return diff
-}
-
 func savingsRatio(baseline int, delta int) float64 {
 	if baseline <= 0 {
 		return 0
 	}
 	return math.Round((float64(delta)/float64(baseline))*1_000_000) / 1_000_000
-}
-
-func roundUSDForReport(value float64) float64 {
-	return math.Round(value*1_000_000_000_000) / 1_000_000_000_000
 }
 
 func cloneAnyMap(source map[string]any) map[string]any {
@@ -763,12 +709,7 @@ func collectTokenSavingsMarkdownRelatedLinks(jsonOutPath string) []string {
 func orderedTokenSavingsCompetitors(
 	pricing map[string]config.SavingsCompetitorPricing,
 ) []string {
-	competitors := make([]string, 0, len(pricing))
-	for competitor := range pricing {
-		competitors = append(competitors, competitor)
-	}
-	slices.Sort(competitors)
-	return competitors
+	return savings.OrderedCompetitors(pricing)
 }
 
 func formatSavingsPctForMarkdown(value float64) string {

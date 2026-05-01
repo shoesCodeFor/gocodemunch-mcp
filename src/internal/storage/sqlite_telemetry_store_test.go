@@ -193,9 +193,10 @@ func TestSQLiteTelemetryStorePersistsPeriodicRuntimeSnapshots(t *testing.T) {
 		Pricing: map[string]telemetry.Pricing{
 			"codex": {InputUSDPerMTok: 1.5, OutputUSDPerMTok: 6},
 		},
-		Store:            store,
-		SnapshotInterval: 10 * time.Millisecond,
-		Now:              func() time.Time { return now },
+		PricingProfileVersion: "pricing-v2026-05-01",
+		Store:                 store,
+		SnapshotInterval:      10 * time.Millisecond,
+		Now:                   func() time.Time { return now },
 	})
 	if err != nil {
 		t.Fatalf("create runtime: %v", err)
@@ -234,6 +235,9 @@ func TestSQLiteTelemetryStorePersistsPeriodicRuntimeSnapshots(t *testing.T) {
 	}
 	if loaded.CapturedAt.IsZero() {
 		t.Fatalf("expected persisted periodic snapshot captured_at to be populated, got %#v", loaded)
+	}
+	if loaded.PricingProfileVersion != "pricing-v2026-05-01" {
+		t.Fatalf("expected persisted periodic snapshot pricing profile version, got %#v", loaded)
 	}
 }
 
@@ -513,5 +517,69 @@ func TestSQLiteTelemetryStoreLoadCallEventsSince(t *testing.T) {
 	}
 	if got := events[0].Call.CostAvoidedUSD["codex"]; got != 0.000027 {
 		t.Fatalf("expected decoded cost_avoided_usd for fresh_tool event, got %#v", events[0].Call.CostAvoidedUSD)
+	}
+}
+
+func TestSQLiteTelemetryStorePreservesPricingProfileVersionOnSnapshotAndCallEvents(t *testing.T) {
+	now := time.Date(2026, 5, 3, 12, 0, 0, 0, time.UTC)
+	store, err := NewSQLiteTelemetryStoreWithOptions(t.TempDir(), SQLiteTelemetryStoreOptions{
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("create telemetry store: %v", err)
+	}
+
+	snapshot := telemetry.PersistedCumulativeSnapshot{
+		CapturedAt:            now,
+		PricingProfileVersion: "pricing-v2026-05-01",
+		Cumulative: telemetry.CumulativeSnapshot{
+			SessionCount: 1,
+			CallCount:    2,
+			TokensSaved:  10,
+		},
+	}
+	if err := store.SaveSnapshot(context.Background(), snapshot); err != nil {
+		t.Fatalf("save telemetry snapshot with pricing profile version: %v", err)
+	}
+
+	loadedSnapshot, err := store.LoadLatestSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("load telemetry snapshot with pricing profile version: %v", err)
+	}
+	if loadedSnapshot.PricingProfileVersion != snapshot.PricingProfileVersion {
+		t.Fatalf("expected snapshot pricing profile version %q, got %#v", snapshot.PricingProfileVersion, loadedSnapshot)
+	}
+
+	eventsToSave := []telemetry.PersistedCallEvent{
+		{
+			CapturedAt:            now,
+			PricingProfileVersion: "pricing-v2026-05-01",
+			Call: telemetry.CallSnapshot{
+				ToolName:          "search_text",
+				StartedAt:         now.Add(-time.Second),
+				FinishedAt:        now,
+				RequestTokens:     10,
+				ResponseTokens:    5,
+				TotalTokens:       15,
+				InputTokensSaved:  4,
+				OutputTokensSaved: 2,
+				TokensSaved:       6,
+				CostAvoidedUSD:    map[string]float64{"codex": 0.000018},
+			},
+		},
+	}
+	if err := store.SaveCallEvents(context.Background(), eventsToSave); err != nil {
+		t.Fatalf("save telemetry call event with pricing profile version: %v", err)
+	}
+
+	loadedEvents, err := store.LoadCallEvents(context.Background(), now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("load telemetry call events with pricing profile version: %v", err)
+	}
+	if len(loadedEvents) != 1 {
+		t.Fatalf("expected one loaded event, got %#v", loadedEvents)
+	}
+	if loadedEvents[0].PricingProfileVersion != "pricing-v2026-05-01" {
+		t.Fatalf("expected call event pricing profile version to round-trip, got %#v", loadedEvents)
 	}
 }

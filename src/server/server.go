@@ -217,27 +217,15 @@ func buildTelemetryRuntime(cfg config.Config) (*telemetry.Runtime, error) {
 	}
 
 	runtime, err := telemetry.NewRuntime(telemetry.RuntimeConfig{
-		Pricing:          telemetryPricing(cfg.SavingsCompetitorPricing),
-		Store:            store,
-		SnapshotInterval: time.Duration(cfg.SavingsSnapshotIntervalMS) * time.Millisecond,
+		Pricing:               telemetry.PricingFromSavings(cfg.SavingsCompetitorPricing),
+		PricingProfileVersion: strings.TrimSpace(cfg.SavingsPricingProfileVersion),
+		Store:                 store,
+		SnapshotInterval:      time.Duration(cfg.SavingsSnapshotIntervalMS) * time.Millisecond,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("initialize savings telemetry runtime: %w", err)
 	}
 	return runtime, nil
-}
-
-func telemetryPricing(
-	pricing map[string]config.SavingsCompetitorPricing,
-) map[string]telemetry.Pricing {
-	converted := make(map[string]telemetry.Pricing, len(pricing))
-	for competitor, value := range pricing {
-		converted[competitor] = telemetry.Pricing{
-			InputUSDPerMTok:  value.InputUSDPerMTok,
-			OutputUSDPerMTok: value.OutputUSDPerMTok,
-		}
-	}
-	return converted
 }
 
 func closeIfPossible(candidate any) {

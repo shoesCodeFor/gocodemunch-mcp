@@ -39,6 +39,9 @@ func runWithArgs(args []string) int {
 		fmt.Fprintf(os.Stderr, "config validation failed: %v\n", err)
 		return 1
 	}
+	for _, warning := range cfg.Warnings {
+		fmt.Fprintf(os.Stderr, "config warning: %s\n", warning)
+	}
 
 	flags := flag.NewFlagSet("gocodemunch-mcp", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)

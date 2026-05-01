@@ -421,6 +421,9 @@ func saveSQLiteTelemetrySnapshot(
 		"call_count":       fmt.Sprintf("%d", snapshot.Cumulative.CallCount),
 		"tokens_saved":     fmt.Sprintf("%d", snapshot.Cumulative.TokensSaved),
 	}
+	if version := strings.TrimSpace(snapshot.PricingProfileVersion); version != "" {
+		metaValues["pricing_profile_version"] = version
+	}
 	for key, value := range metaValues {
 		if _, err := tx.ExecContext(
 			ctx,
@@ -553,7 +556,8 @@ func loadSQLiteTelemetryCallEvents(
 		input_tokens_saved,
 		output_tokens_saved,
 		tokens_saved,
-		cost_avoided_usd
+		cost_avoided_usd,
+		payload
 	FROM call_events`
 	args := []any{}
 	if !since.IsZero() {
@@ -583,6 +587,7 @@ func loadSQLiteTelemetryCallEvents(
 			outputTokensSaved  int
 			tokensSaved        int
 			costAvoidedUSDJSON string
+			payload            string
 		)
 		if err := rows.Scan(
 			&capturedAtRaw,
@@ -597,6 +602,7 @@ func loadSQLiteTelemetryCallEvents(
 			&outputTokensSaved,
 			&tokensSaved,
 			&costAvoidedUSDJSON,
+			&payload,
 		); err != nil {
 			return nil, fmt.Errorf("scan telemetry sqlite call event: %w", err)
 		}
@@ -621,22 +627,68 @@ func loadSQLiteTelemetryCallEvents(
 			}
 		}
 
-		events = append(events, normalizePersistedCallEvent(telemetry.PersistedCallEvent{
-			CapturedAt: capturedAt,
-			Call: telemetry.CallSnapshot{
-				ToolName:          toolName,
-				StartedAt:         startedAt,
-				FinishedAt:        finishedAt,
-				RequestTokens:     requestTokens,
-				ResponseTokens:    responseTokens,
-				TotalTokens:       totalTokens,
-				InputTokensSaved:  inputTokensSaved,
-				OutputTokensSaved: outputTokensSaved,
-				TokensSaved:       tokensSaved,
-				LogicalCalls:      logicalCalls,
-				CostAvoidedUSD:    costAvoidedUSD,
-			},
-		}, fallback))
+		decodedEvent := telemetry.PersistedCallEvent{}
+		if strings.TrimSpace(payload) != "" {
+			if err := json.Unmarshal([]byte(payload), &decodedEvent); err != nil {
+				return nil, fmt.Errorf("decode telemetry call event payload: %w", err)
+			}
+		} else {
+			decodedEvent = telemetry.PersistedCallEvent{
+				CapturedAt: capturedAt,
+				Call: telemetry.CallSnapshot{
+					ToolName:          toolName,
+					StartedAt:         startedAt,
+					FinishedAt:        finishedAt,
+					RequestTokens:     requestTokens,
+					ResponseTokens:    responseTokens,
+					TotalTokens:       totalTokens,
+					InputTokensSaved:  inputTokensSaved,
+					OutputTokensSaved: outputTokensSaved,
+					TokensSaved:       tokensSaved,
+					LogicalCalls:      logicalCalls,
+					CostAvoidedUSD:    costAvoidedUSD,
+				},
+			}
+		}
+
+		if decodedEvent.CapturedAt.IsZero() {
+			decodedEvent.CapturedAt = capturedAt
+		}
+		if strings.TrimSpace(decodedEvent.Call.ToolName) == "" {
+			decodedEvent.Call.ToolName = toolName
+		}
+		if decodedEvent.Call.StartedAt.IsZero() {
+			decodedEvent.Call.StartedAt = startedAt
+		}
+		if decodedEvent.Call.FinishedAt.IsZero() {
+			decodedEvent.Call.FinishedAt = finishedAt
+		}
+		if decodedEvent.Call.RequestTokens == 0 {
+			decodedEvent.Call.RequestTokens = requestTokens
+		}
+		if decodedEvent.Call.ResponseTokens == 0 {
+			decodedEvent.Call.ResponseTokens = responseTokens
+		}
+		if decodedEvent.Call.TotalTokens == 0 {
+			decodedEvent.Call.TotalTokens = totalTokens
+		}
+		if decodedEvent.Call.InputTokensSaved == 0 {
+			decodedEvent.Call.InputTokensSaved = inputTokensSaved
+		}
+		if decodedEvent.Call.OutputTokensSaved == 0 {
+			decodedEvent.Call.OutputTokensSaved = outputTokensSaved
+		}
+		if decodedEvent.Call.TokensSaved == 0 {
+			decodedEvent.Call.TokensSaved = tokensSaved
+		}
+		if decodedEvent.Call.LogicalCalls == 0 {
+			decodedEvent.Call.LogicalCalls = logicalCalls
+		}
+		if len(decodedEvent.Call.CostAvoidedUSD) == 0 {
+			decodedEvent.Call.CostAvoidedUSD = costAvoidedUSD
+		}
+
+		events = append(events, normalizePersistedCallEvent(decodedEvent, fallback))
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate telemetry sqlite call events: %w", err)
@@ -689,6 +741,7 @@ func normalizePersistedCallEvent(
 	call := event.Call
 
 	event.CapturedAt = event.CapturedAt.UTC()
+	event.PricingProfileVersion = strings.TrimSpace(event.PricingProfileVersion)
 	if event.CapturedAt.IsZero() {
 		if !call.FinishedAt.IsZero() {
 			event.CapturedAt = call.FinishedAt.UTC()

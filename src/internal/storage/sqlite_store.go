@@ -308,11 +308,27 @@ func (s *SQLiteIndexStore) openDB(path string) (*sql.DB, error) {
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	if err := initSQLiteSchema(db); err != nil {
+	if err := initSQLiteSchemaWithRetry(db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	return db, nil
+}
+
+func initSQLiteSchemaWithRetry(db *sql.DB) error {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := initSQLiteSchema(db); err == nil {
+			return nil
+		} else {
+			lastErr = err
+			if !isSQLiteBusyErr(err) || attempt == 2 {
+				break
+			}
+			time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
+		}
+	}
+	return lastErr
 }
 
 func initSQLiteSchema(db *sql.DB) error {

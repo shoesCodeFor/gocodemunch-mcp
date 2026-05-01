@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/jgravelle/gocodemunch-mcp/src/internal/savings"
 )
 
 func TestLoadFanoutDefaults(t *testing.T) {
@@ -121,24 +123,32 @@ func TestSavingsConfigDefaults(t *testing.T) {
 			cfg.SavingsSnapshotIntervalMS,
 		)
 	}
+	if cfg.SavingsPricingProfileVersion != savings.DefaultPricingProfileVersion {
+		t.Fatalf(
+			"expected default savings pricing profile version %q, got %q",
+			savings.DefaultPricingProfileVersion,
+			cfg.SavingsPricingProfileVersion,
+		)
+	}
 
 	claudePricing, ok := cfg.SavingsCompetitorPricing[savingsCompetitorClaudeCode]
 	if !ok {
 		t.Fatalf("expected %q pricing defaults to be present", savingsCompetitorClaudeCode)
 	}
-	if claudePricing.InputUSDPerMTok != defaultSavingsClaudeCodeInputUSDPerMTok {
+	claudeDefaults, _ := savings.DefaultPricingForCompetitor(savingsCompetitorClaudeCode)
+	if claudePricing.InputUSDPerMTok != claudeDefaults.InputUSDPerMTok {
 		t.Fatalf(
 			"expected default %q input pricing %g, got %g",
 			savingsCompetitorClaudeCode,
-			defaultSavingsClaudeCodeInputUSDPerMTok,
+			claudeDefaults.InputUSDPerMTok,
 			claudePricing.InputUSDPerMTok,
 		)
 	}
-	if claudePricing.OutputUSDPerMTok != defaultSavingsClaudeCodeOutputUSDPerMTok {
+	if claudePricing.OutputUSDPerMTok != claudeDefaults.OutputUSDPerMTok {
 		t.Fatalf(
 			"expected default %q output pricing %g, got %g",
 			savingsCompetitorClaudeCode,
-			defaultSavingsClaudeCodeOutputUSDPerMTok,
+			claudeDefaults.OutputUSDPerMTok,
 			claudePricing.OutputUSDPerMTok,
 		)
 	}
@@ -147,19 +157,20 @@ func TestSavingsConfigDefaults(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected %q pricing defaults to be present", savingsCompetitorCodex)
 	}
-	if codexPricing.InputUSDPerMTok != defaultSavingsCodexInputUSDPerMTok {
+	codexDefaults, _ := savings.DefaultPricingForCompetitor(savingsCompetitorCodex)
+	if codexPricing.InputUSDPerMTok != codexDefaults.InputUSDPerMTok {
 		t.Fatalf(
 			"expected default %q input pricing %g, got %g",
 			savingsCompetitorCodex,
-			defaultSavingsCodexInputUSDPerMTok,
+			codexDefaults.InputUSDPerMTok,
 			codexPricing.InputUSDPerMTok,
 		)
 	}
-	if codexPricing.OutputUSDPerMTok != defaultSavingsCodexOutputUSDPerMTok {
+	if codexPricing.OutputUSDPerMTok != codexDefaults.OutputUSDPerMTok {
 		t.Fatalf(
 			"expected default %q output pricing %g, got %g",
 			savingsCompetitorCodex,
-			defaultSavingsCodexOutputUSDPerMTok,
+			codexDefaults.OutputUSDPerMTok,
 			codexPricing.OutputUSDPerMTok,
 		)
 	}
@@ -168,19 +179,20 @@ func TestSavingsConfigDefaults(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected %q pricing defaults to be present", savingsCompetitorAmp)
 	}
-	if ampPricing.InputUSDPerMTok != defaultSavingsAmpInputUSDPerMTok {
+	ampDefaults, _ := savings.DefaultPricingForCompetitor(savingsCompetitorAmp)
+	if ampPricing.InputUSDPerMTok != ampDefaults.InputUSDPerMTok {
 		t.Fatalf(
 			"expected default %q input pricing %g, got %g",
 			savingsCompetitorAmp,
-			defaultSavingsAmpInputUSDPerMTok,
+			ampDefaults.InputUSDPerMTok,
 			ampPricing.InputUSDPerMTok,
 		)
 	}
-	if ampPricing.OutputUSDPerMTok != defaultSavingsAmpOutputUSDPerMTok {
+	if ampPricing.OutputUSDPerMTok != ampDefaults.OutputUSDPerMTok {
 		t.Fatalf(
 			"expected default %q output pricing %g, got %g",
 			savingsCompetitorAmp,
-			defaultSavingsAmpOutputUSDPerMTok,
+			ampDefaults.OutputUSDPerMTok,
 			ampPricing.OutputUSDPerMTok,
 		)
 	}
@@ -228,9 +240,6 @@ func TestSavingsConfigValidationErrors(t *testing.T) {
 
 	t.Setenv("GOCODEMUNCH_SAVINGS_TELEMETRY_ENABLED", "maybe")
 	t.Setenv("GOCODEMUNCH_SAVINGS_SNAPSHOT_INTERVAL_MS", "0")
-	t.Setenv("GOCODEMUNCH_SAVINGS_CLAUDE_CODE_INPUT_USD_PER_MTOK", "-1")
-	t.Setenv("GOCODEMUNCH_SAVINGS_CODEX_OUTPUT_USD_PER_MTOK", "NaN-ish")
-	t.Setenv("GOCODEMUNCH_SAVINGS_AMP_INPUT_USD_PER_MTOK", "-3")
 
 	_, err := Load()
 	if err == nil {
@@ -241,12 +250,55 @@ func TestSavingsConfigValidationErrors(t *testing.T) {
 	for _, field := range []string{
 		"GOCODEMUNCH_SAVINGS_TELEMETRY_ENABLED",
 		"GOCODEMUNCH_SAVINGS_SNAPSHOT_INTERVAL_MS",
+	} {
+		if !strings.Contains(message, field) {
+			t.Fatalf("expected validation message to mention %s: %q", field, message)
+		}
+	}
+}
+
+func TestSavingsPricingValidationFallsBackToDefaultsWithWarnings(t *testing.T) {
+	isolateConfigPath(t)
+
+	t.Setenv("GOCODEMUNCH_SAVINGS_CLAUDE_CODE_INPUT_USD_PER_MTOK", "-1")
+	t.Setenv("GOCODEMUNCH_SAVINGS_CODEX_OUTPUT_USD_PER_MTOK", "NaN-ish")
+	t.Setenv("GOCODEMUNCH_SAVINGS_AMP_INPUT_USD_PER_MTOK", "Infinity")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected pricing fallback warning path to succeed, got %v", err)
+	}
+
+	claudeDefaults, _ := savings.DefaultPricingForCompetitor(savingsCompetitorClaudeCode)
+	if got := cfg.SavingsCompetitorPricing[savingsCompetitorClaudeCode]; got.InputUSDPerMTok != claudeDefaults.InputUSDPerMTok {
+		t.Fatalf("expected claude_code input pricing fallback to default %#v, got %#v", claudeDefaults, got)
+	}
+	codexDefaults, _ := savings.DefaultPricingForCompetitor(savingsCompetitorCodex)
+	if got := cfg.SavingsCompetitorPricing[savingsCompetitorCodex]; got.OutputUSDPerMTok != codexDefaults.OutputUSDPerMTok {
+		t.Fatalf("expected codex output pricing fallback to default %#v, got %#v", codexDefaults, got)
+	}
+	ampDefaults, _ := savings.DefaultPricingForCompetitor(savingsCompetitorAmp)
+	if got := cfg.SavingsCompetitorPricing[savingsCompetitorAmp]; got.InputUSDPerMTok != ampDefaults.InputUSDPerMTok {
+		t.Fatalf("expected amp input pricing fallback to default %#v, got %#v", ampDefaults, got)
+	}
+
+	if len(cfg.Warnings) != 3 {
+		t.Fatalf("expected three pricing warnings, got %#v", cfg.Warnings)
+	}
+	for _, field := range []string{
 		"GOCODEMUNCH_SAVINGS_CLAUDE_CODE_INPUT_USD_PER_MTOK",
 		"GOCODEMUNCH_SAVINGS_CODEX_OUTPUT_USD_PER_MTOK",
 		"GOCODEMUNCH_SAVINGS_AMP_INPUT_USD_PER_MTOK",
 	} {
-		if !strings.Contains(message, field) {
-			t.Fatalf("expected validation message to mention %s: %q", field, message)
+		found := false
+		for _, warning := range cfg.Warnings {
+			if strings.Contains(warning, field) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected warnings to mention %s: %#v", field, cfg.Warnings)
 		}
 	}
 }

@@ -5,16 +5,11 @@ import (
 	"math"
 	"time"
 
+	"github.com/jgravelle/gocodemunch-mcp/src/internal/savings"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/telemetry"
 )
 
 const estimatedSerializedBytesPerToken = 4.0
-
-var defaultSavingsCompetitors = []string{
-	"claude_code",
-	"codex",
-	"amp",
-}
 
 func (s *Service) recordTelemetry(
 	name string,
@@ -190,20 +185,7 @@ func (s *Service) zeroCumulativeSnapshot() telemetry.CumulativeSnapshot {
 }
 
 func (s *Service) zeroCostAvoidedUSD() map[string]float64 {
-	pricing := s.cfg.SavingsCompetitorPricing
-	if len(pricing) == 0 {
-		zeroes := make(map[string]float64, len(defaultSavingsCompetitors))
-		for _, competitor := range defaultSavingsCompetitors {
-			zeroes[competitor] = 0
-		}
-		return zeroes
-	}
-
-	zeroes := make(map[string]float64, len(pricing))
-	for competitor := range pricing {
-		zeroes[competitor] = 0
-	}
-	return zeroes
+	return savings.ZeroCostMap(s.cfg.SavingsCompetitorPricing)
 }
 
 func (s *Service) normalizeCostAvoidedUSD(costs map[string]float64) map[string]float64 {

@@ -3,11 +3,14 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/jgravelle/gocodemunch-mcp/src/internal/savings"
 )
 
 const (
@@ -41,27 +44,17 @@ const (
 
 	defaultSavingsTelemetryEnabled   = true
 	defaultSavingsSnapshotIntervalMS = 30000
-
-	defaultSavingsClaudeCodeInputUSDPerMTok  = 3.00
-	defaultSavingsClaudeCodeOutputUSDPerMTok = 15.00
-	defaultSavingsCodexInputUSDPerMTok       = 1.50
-	defaultSavingsCodexOutputUSDPerMTok      = 6.00
-	defaultSavingsAmpInputUSDPerMTok         = 1.50
-	defaultSavingsAmpOutputUSDPerMTok        = 6.00
 )
 
 const (
-	savingsCompetitorClaudeCode = "claude_code"
-	savingsCompetitorCodex      = "codex"
-	savingsCompetitorAmp        = "amp"
+	savingsCompetitorClaudeCode = savings.CompetitorClaudeCode
+	savingsCompetitorCodex      = savings.CompetitorCodex
+	savingsCompetitorAmp        = savings.CompetitorAmp
 )
 
 // SavingsCompetitorPricing models per-competitor token pricing in USD per
 // million tokens.
-type SavingsCompetitorPricing struct {
-	InputUSDPerMTok  float64
-	OutputUSDPerMTok float64
-}
+type SavingsCompetitorPricing = savings.Pricing
 
 // Config holds process-level server configuration.
 type Config struct {
@@ -132,9 +125,13 @@ type Config struct {
 	SavingsTelemetryEnabled bool
 	// SavingsSnapshotIntervalMS controls periodic persistence cadence in milliseconds.
 	SavingsSnapshotIntervalMS int
+	// SavingsPricingProfileVersion identifies the built-in competitor pricing table.
+	SavingsPricingProfileVersion string
 	// SavingsCompetitorPricing stores baseline competitor pricing in USD per million tokens.
 	SavingsCompetitorPricing map[string]SavingsCompetitorPricing
-	Disabled                 map[string]struct{}
+	// Warnings captures non-fatal config normalization messages.
+	Warnings []string
+	Disabled map[string]struct{}
 	// TrustedFolders constrains local indexing roots by containment policy.
 	TrustedFolders []string
 	// nil => default whitelist mode (true), non-nil => explicit whitelist/blacklist mode.
@@ -205,20 +202,26 @@ func Load() (Config, error) {
 			os.Getenv("GOCODEMUNCH_FANOUT_ITEM_TIMEOUT_MS"),
 			defaultFanoutItemTimeoutMS,
 		),
-		MaxFolderFiles:            defaultMaxFolderFiles,
-		MaxIndexFiles:             defaultMaxIndexFiles,
-		SavingsTelemetryEnabled:   defaultSavingsTelemetryEnabled,
-		SavingsSnapshotIntervalMS: defaultSavingsSnapshotIntervalMS,
-		SavingsCompetitorPricing:  defaultSavingsCompetitorPricing(),
-		Disabled:                  map[string]struct{}{},
+		MaxFolderFiles:               defaultMaxFolderFiles,
+		MaxIndexFiles:                defaultMaxIndexFiles,
+		SavingsTelemetryEnabled:      defaultSavingsTelemetryEnabled,
+		SavingsSnapshotIntervalMS:    defaultSavingsSnapshotIntervalMS,
+		SavingsPricingProfileVersion: savings.DefaultPricingProfileVersion,
+		SavingsCompetitorPricing:     defaultSavingsCompetitorPricing(),
+		Disabled:                     map[string]struct{}{},
 	}
 
 	if err := applyVectorEnvOverrides(&cfg); err != nil {
 		return cfg, err
 	}
-	if err := applySavingsEnvOverrides(&cfg); err != nil {
+	savingsWarnings, err := applySavingsEnvOverrides(&cfg)
+	if err != nil {
 		return cfg, err
 	}
+	cfg.Warnings = append(cfg.Warnings, savingsWarnings...)
+	normalizedPricing, pricingWarnings := savings.NormalizePricing(cfg.SavingsCompetitorPricing)
+	cfg.SavingsCompetitorPricing = normalizedPricing
+	cfg.Warnings = append(cfg.Warnings, pricingWarnings...)
 
 	if snapshot.HasLanguages {
 		cfg.Languages = snapshot.Languages
@@ -372,6 +375,7 @@ func (c Config) clone() Config {
 	cloned.ExtraIgnorePatterns = cloneStringSlice(c.ExtraIgnorePatterns)
 	cloned.ExcludeSecretPatterns = cloneStringSlice(c.ExcludeSecretPatterns)
 	cloned.SavingsCompetitorPricing = cloneSavingsCompetitorPricing(c.SavingsCompetitorPricing)
+	cloned.Warnings = cloneStringSlice(c.Warnings)
 	cloned.Disabled = cloneStringSet(c.Disabled)
 	cloned.TrustedFolders = cloneStringSlice(c.TrustedFolders)
 	cloned.TrustedFoldersWhitelistMode = cloneBoolPtr(c.TrustedFoldersWhitelistMode)
@@ -663,28 +667,16 @@ func applyVectorEnvOverrides(cfg *Config) error {
 }
 
 func defaultSavingsCompetitorPricing() map[string]SavingsCompetitorPricing {
-	return map[string]SavingsCompetitorPricing{
-		savingsCompetitorClaudeCode: {
-			InputUSDPerMTok:  defaultSavingsClaudeCodeInputUSDPerMTok,
-			OutputUSDPerMTok: defaultSavingsClaudeCodeOutputUSDPerMTok,
-		},
-		savingsCompetitorCodex: {
-			InputUSDPerMTok:  defaultSavingsCodexInputUSDPerMTok,
-			OutputUSDPerMTok: defaultSavingsCodexOutputUSDPerMTok,
-		},
-		savingsCompetitorAmp: {
-			InputUSDPerMTok:  defaultSavingsAmpInputUSDPerMTok,
-			OutputUSDPerMTok: defaultSavingsAmpOutputUSDPerMTok,
-		},
-	}
+	return savings.DefaultPricing()
 }
 
-func applySavingsEnvOverrides(cfg *Config) error {
+func applySavingsEnvOverrides(cfg *Config) ([]string, error) {
 	if cfg == nil {
-		return nil
+		return nil, nil
 	}
 
 	validationErrors := []string{}
+	warnings := []string{}
 
 	if raw, ok := getenvTrimmed("GOCODEMUNCH_SAVINGS_TELEMETRY_ENABLED"); ok {
 		enabled, parsed := parseBoolean(raw)
@@ -720,65 +712,58 @@ func applySavingsEnvOverrides(cfg *Config) error {
 
 	applySavingsPricingEnvOverride(
 		cfg,
-		&validationErrors,
+		&warnings,
 		"GOCODEMUNCH_SAVINGS_CLAUDE_CODE_INPUT_USD_PER_MTOK",
 		savingsCompetitorClaudeCode,
-		defaultSavingsClaudeCodeInputUSDPerMTok,
 		false,
 	)
 	applySavingsPricingEnvOverride(
 		cfg,
-		&validationErrors,
+		&warnings,
 		"GOCODEMUNCH_SAVINGS_CLAUDE_CODE_OUTPUT_USD_PER_MTOK",
 		savingsCompetitorClaudeCode,
-		defaultSavingsClaudeCodeOutputUSDPerMTok,
 		true,
 	)
 	applySavingsPricingEnvOverride(
 		cfg,
-		&validationErrors,
+		&warnings,
 		"GOCODEMUNCH_SAVINGS_CODEX_INPUT_USD_PER_MTOK",
 		savingsCompetitorCodex,
-		defaultSavingsCodexInputUSDPerMTok,
 		false,
 	)
 	applySavingsPricingEnvOverride(
 		cfg,
-		&validationErrors,
+		&warnings,
 		"GOCODEMUNCH_SAVINGS_CODEX_OUTPUT_USD_PER_MTOK",
 		savingsCompetitorCodex,
-		defaultSavingsCodexOutputUSDPerMTok,
 		true,
 	)
 	applySavingsPricingEnvOverride(
 		cfg,
-		&validationErrors,
+		&warnings,
 		"GOCODEMUNCH_SAVINGS_AMP_INPUT_USD_PER_MTOK",
 		savingsCompetitorAmp,
-		defaultSavingsAmpInputUSDPerMTok,
 		false,
 	)
 	applySavingsPricingEnvOverride(
 		cfg,
-		&validationErrors,
+		&warnings,
 		"GOCODEMUNCH_SAVINGS_AMP_OUTPUT_USD_PER_MTOK",
 		savingsCompetitorAmp,
-		defaultSavingsAmpOutputUSDPerMTok,
 		true,
 	)
 
 	if len(validationErrors) == 0 {
-		return nil
+		return warnings, nil
 	}
-	return fmt.Errorf("savings configuration validation failed: %s", strings.Join(validationErrors, "; "))
+	return warnings, fmt.Errorf("savings configuration validation failed: %s", strings.Join(validationErrors, "; "))
 }
 
 func applySavingsPricingEnvOverride(
 	cfg *Config,
-	validationErrors *[]string,
+	warnings *[]string,
 	envKey string,
 	competitor string,
-	fallback float64,
 	output bool,
 ) {
 	raw, ok := getenvTrimmed(envKey)
@@ -786,16 +771,25 @@ func applySavingsPricingEnvOverride(
 		return
 	}
 
+	defaultPricing, hasDefault := savings.DefaultPricingForCompetitor(competitor)
+	if !hasDefault {
+		return
+	}
+	fallback := defaultPricing.InputUSDPerMTok
+	if output {
+		fallback = defaultPricing.OutputUSDPerMTok
+	}
+
 	value, err := strconv.ParseFloat(raw, 64)
-	if err != nil || value < 0 {
+	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
 		metric := "input"
 		if output {
 			metric = "output"
 		}
-		*validationErrors = append(
-			*validationErrors,
+		*warnings = append(
+			*warnings,
 			fmt.Sprintf(
-				"%s must be a non-negative number in USD per million %s tokens (got %q); set %s=%g",
+				"%s must be a finite non-negative number in USD per million %s tokens (got %q); using default %s=%g",
 				envKey,
 				metric,
 				raw,

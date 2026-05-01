@@ -27,10 +27,14 @@ This phase hardens the prototype into reliable runtime infrastructure by coverin
   - Completed in loop `00001`: introduced explicit `session_rollups` and `total_rollups` alongside the existing top-level stats keys, preserving the legacy envelope while exposing per-tool and per-competitor breakdowns in a stable nested shape.
   - Completed in loop `00001`: added runtime/store/orchestration coverage for persisted trend aggregation, SQLite call-event loading, and backward-compatible `get_session_stats` responses; verified with `go test ./src/internal/orchestration ./src/internal/telemetry ./src/internal/storage ./tests-go ./src/server -count=1` and `go vet ./src/internal/orchestration ./src/internal/telemetry ./src/internal/storage ./src/server ./tests-go`.
 
-- [ ] Strengthen pricing/profile normalization for Claude Code, Codex, and Amp:
+- [x] Strengthen pricing/profile normalization for Claude Code, Codex, and Amp:
   - Centralize competitor profile definitions and unit costs in one reusable module instead of scattering constants.
   - Add config validation for malformed or negative pricing values with safe fallback behavior.
   - Include an explicit version tag in stored snapshots so future pricing updates remain auditable.
+  - Completed in loop `00001`: added a shared `src/internal/savings` profile catalog for Claude Code, Codex, and Amp, reused it across config loading, orchestration zero-cost normalization, telemetry runtime wiring, and eval token-savings cost reporting so default unit costs and competitor IDs are no longer duplicated across packages.
+  - Completed in loop `00001`: changed malformed, infinite, or negative `GOCODEMUNCH_SAVINGS_*_USD_PER_MTOK` overrides to emit non-fatal config warnings while falling back to the catalog defaults, and surfaced those warnings in the CLI startup paths instead of aborting telemetry startup on bad pricing overrides.
+  - Completed in loop `00001`: tagged persisted telemetry cumulative snapshots and call-event payloads with `pricing_profile_version`, added round-trip/runtime coverage for the new field, and hardened SQLite index-store schema initialization retries so the full targeted storage/telemetry suite stays green under concurrent access.
+  - Completed in loop `00001`: verified with `go test ./src/internal/savings ./src/internal/config ./src/internal/telemetry ./src/internal/storage ./src/internal/orchestration ./src/server ./src/cmd/gocodemunch-eval ./tests-go -count=1`, `go test ./src/cmd/gocodemunch-mcp ./src/cmd/vector-smoke -count=1`, and `go vet ./src/internal/savings ./src/internal/config ./src/internal/telemetry ./src/internal/storage ./src/internal/orchestration ./src/server ./src/cmd/gocodemunch-eval ./tests-go`.
 
 - [ ] Add robust tests for migrations, trend queries, and failure isolation:
   - Add migration tests that upgrade older telemetry schema versions to the latest schema safely.

@@ -88,14 +88,16 @@ type CumulativeSnapshot struct {
 
 // PersistedCumulativeSnapshot captures a point-in-time cumulative snapshot row.
 type PersistedCumulativeSnapshot struct {
-	CapturedAt time.Time          `json:"captured_at"`
-	Cumulative CumulativeSnapshot `json:"cumulative"`
+	CapturedAt            time.Time          `json:"captured_at"`
+	PricingProfileVersion string             `json:"pricing_profile_version,omitempty"`
+	Cumulative            CumulativeSnapshot `json:"cumulative"`
 }
 
 // PersistedCallEvent captures one persisted per-call telemetry event row.
 type PersistedCallEvent struct {
-	CapturedAt time.Time    `json:"captured_at"`
-	Call       CallSnapshot `json:"call"`
+	CapturedAt            time.Time    `json:"captured_at"`
+	PricingProfileVersion string       `json:"pricing_profile_version,omitempty"`
+	Call                  CallSnapshot `json:"call"`
 }
 
 // Collector is the runtime-facing telemetry contract.

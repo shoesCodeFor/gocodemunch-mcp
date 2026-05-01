@@ -15,6 +15,8 @@ import (
 
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/config"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/domain/indexing"
+	"github.com/jgravelle/gocodemunch-mcp/src/internal/savings"
+	"github.com/jgravelle/gocodemunch-mcp/src/internal/telemetry"
 )
 
 func TestRunWithArgsEmitsPerQueryAndAggregateMetrics(t *testing.T) {
@@ -153,7 +155,7 @@ func TestEstimateSerializedTokensForReportHandlesMarshalErrorsAndRoundsUp(t *tes
 }
 
 func TestTokenSavingsTelemetryPricingPreservesCompetitorRates(t *testing.T) {
-	converted := tokenSavingsTelemetryPricing(map[string]config.SavingsCompetitorPricing{
+	converted := telemetry.PricingFromSavings(map[string]config.SavingsCompetitorPricing{
 		"claude_code": {InputUSDPerMTok: 3.0, OutputUSDPerMTok: 15.0},
 		"codex":       {InputUSDPerMTok: 1.5, OutputUSDPerMTok: 6.0},
 	})
@@ -172,7 +174,7 @@ func TestCompetitorCostsAndDeltaMathUseSeparateRates(t *testing.T) {
 		"codex":       {InputUSDPerMTok: 2.0, OutputUSDPerMTok: 4.0},
 	}
 
-	costs := competitorCosts(pricing, 100, 50)
+	costs := savings.CostsForTokens(pricing, 100, 50)
 	if got := costs["claude_code"]; got != 0.00055 {
 		t.Fatalf("expected claude_code input/output blended cost 0.00055, got %#v", costs)
 	}
@@ -180,7 +182,7 @@ func TestCompetitorCostsAndDeltaMathUseSeparateRates(t *testing.T) {
 		t.Fatalf("expected codex input/output blended cost 0.0004, got %#v", costs)
 	}
 
-	diff := diffCostMap(
+	diff := savings.DiffCostMap(
 		map[string]float64{"claude_code": 0.00055, "codex": 0.0004},
 		map[string]float64{"claude_code": 0.0006, "codex": 0.0001},
 		pricing,
