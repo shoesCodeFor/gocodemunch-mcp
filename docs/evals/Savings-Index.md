@@ -14,4 +14,5 @@ related:
 
 Newest-first wiki-links to token savings reports in `docs/evals/savings-runs`.
 
+- [[20260501-071956z-token-savings-smoke]]
 - [[20260501-071027z-token-savings-smoke]]

@@ -1,5 +1,5 @@
 {
-  "generated_at_utc": "2026-05-01T07:10:27Z",
+  "generated_at_utc": "2026-05-01T07:19:56Z",
   "mode": "token-savings-smoke",
   "dataset": "token-savings-smoke",
   "suite_version": "v1",
@@ -41,9 +41,9 @@
         "tool_request_tokens": 26,
         "tool_response_tokens": 61,
         "cost_usd": {
-          "amp": 0.000153,
-          "claude_code": 0.000306,
-          "codex": 0.000153
+          "amp": 0.0004275,
+          "claude_code": 0.001038,
+          "codex": 0.0004275
         }
       },
       "without_mcp": {
@@ -61,9 +61,9 @@
         "tokens_saved": 219,
         "savings_pct": 0.682243,
         "cost_saved_usd": {
-          "amp": 0.0003285,
-          "claude_code": 0.000657,
-          "codex": 0.0003285
+          "amp": 0.000054,
+          "claude_code": -0.000075,
+          "codex": 0.000054
         }
       }
     },
@@ -80,14 +80,14 @@
       ],
       "with_mcp": {
         "input_tokens": 43,
-        "output_tokens": 36,
-        "total_tokens": 79,
+        "output_tokens": 35,
+        "total_tokens": 78,
         "tool_request_tokens": 30,
-        "tool_response_tokens": 36,
+        "tool_response_tokens": 35,
         "cost_usd": {
-          "amp": 0.0001185,
-          "claude_code": 0.000237,
-          "codex": 0.0001185
+          "amp": 0.0002745,
+          "claude_code": 0.000654,
+          "codex": 0.0002745
         }
       },
       "without_mcp": {
@@ -102,12 +102,12 @@
         }
       },
       "savings": {
-        "tokens_saved": 124,
-        "savings_pct": 0.610837,
+        "tokens_saved": 125,
+        "savings_pct": 0.615764,
         "cost_saved_usd": {
-          "amp": 0.000186,
-          "claude_code": 0.000372,
-          "codex": 0.000186
+          "amp": 0.00003,
+          "claude_code": -0.000045,
+          "codex": 0.00003
         }
       }
     },
@@ -127,14 +127,14 @@
       ],
       "with_mcp": {
         "input_tokens": 47,
-        "output_tokens": 83,
-        "total_tokens": 130,
+        "output_tokens": 82,
+        "total_tokens": 129,
         "tool_request_tokens": 33,
-        "tool_response_tokens": 83,
+        "tool_response_tokens": 82,
         "cost_usd": {
-          "amp": 0.000195,
-          "claude_code": 0.00039,
-          "codex": 0.000195
+          "amp": 0.0005625,
+          "claude_code": 0.001371,
+          "codex": 0.0005625
         }
       },
       "without_mcp": {
@@ -149,12 +149,12 @@
         }
       },
       "savings": {
-        "tokens_saved": 190,
-        "savings_pct": 0.59375,
+        "tokens_saved": 191,
+        "savings_pct": 0.596875,
         "cost_saved_usd": {
-          "amp": 0.000285,
-          "claude_code": 0.00057,
-          "codex": 0.000285
+          "amp": -0.0000825,
+          "claude_code": -0.000411,
+          "codex": -0.0000825
         }
       }
     },
@@ -179,9 +179,9 @@
         "tool_request_tokens": 32,
         "tool_response_tokens": 58,
         "cost_usd": {
-          "amp": 0.0001515,
-          "claude_code": 0.000303,
-          "codex": 0.0001515
+          "amp": 0.0004125,
+          "claude_code": 0.000999,
+          "codex": 0.0004125
         }
       },
       "without_mcp": {
@@ -199,9 +199,9 @@
         "tokens_saved": 216,
         "savings_pct": 0.681388,
         "cost_saved_usd": {
-          "amp": 0.000324,
-          "claude_code": 0.000648,
-          "codex": 0.000324
+          "amp": 0.000063,
+          "claude_code": -0.000048,
+          "codex": 0.000063
         }
       }
     },
@@ -227,9 +227,9 @@
         "tool_request_tokens": 35,
         "tool_response_tokens": 227,
         "cost_usd": {
-          "amp": 0.0004095,
-          "claude_code": 0.000819,
-          "codex": 0.0004095
+          "amp": 0.001431,
+          "claude_code": 0.003543,
+          "codex": 0.001431
         }
       },
       "without_mcp": {
@@ -247,9 +247,9 @@
         "tokens_saved": 44,
         "savings_pct": 0.138801,
         "cost_saved_usd": {
-          "amp": 0.000066,
-          "claude_code": 0.000132,
-          "codex": 0.000066
+          "amp": -0.0009555,
+          "claude_code": -0.002592,
+          "codex": -0.0009555
         }
       }
     }
@@ -258,12 +258,12 @@
     "case_count": 5,
     "with_mcp": {
       "input_tokens": 220,
-      "output_tokens": 465,
-      "total_tokens": 685,
+      "output_tokens": 463,
+      "total_tokens": 683,
       "cost_usd": {
-        "amp": 0.0010275,
-        "claude_code": 0.002055,
-        "codex": 0.0010275
+        "amp": 0.003108,
+        "claude_code": 0.007605,
+        "codex": 0.003108
       }
     },
     "without_mcp": {
@@ -277,12 +277,12 @@
       }
     },
     "savings": {
-      "tokens_saved": 793,
-      "savings_pct": 0.536536,
+      "tokens_saved": 795,
+      "savings_pct": 0.537889,
       "cost_saved_usd": {
-        "amp": 0.0011895,
-        "claude_code": 0.002379,
-        "codex": 0.0011895
+        "amp": -0.000891,
+        "claude_code": -0.003171,
+        "codex": -0.000891
       }
     }
   }
