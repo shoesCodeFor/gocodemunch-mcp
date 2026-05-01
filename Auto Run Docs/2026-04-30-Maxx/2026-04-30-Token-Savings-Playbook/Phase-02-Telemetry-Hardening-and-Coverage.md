@@ -19,10 +19,13 @@ This phase hardens the prototype into reliable runtime infrastructure by coverin
   - Completed in loop `00001`: extended the telemetry runtime/store seam so per-call events are batched and persisted alongside periodic cumulative snapshots, added 30-day retention compaction for stale call-event rows, and preserved cumulative snapshot history for long-range trend reconstruction.
   - Completed in loop `00001`: added migration, retention, and runtime retry coverage in `src/internal/storage/sqlite_telemetry_store_test.go` and `src/internal/telemetry/tracker_test.go`; verified with `go test ./src/internal/telemetry ./src/internal/storage ./src/internal/orchestration ./src/server ./tests-go -count=1` and `go vet ./src/internal/telemetry ./src/internal/storage ./src/internal/orchestration ./src/server ./tests-go`.
 
-- [ ] Enrich `get_session_stats` with trend windows while preserving backward compatibility:
+- [x] Enrich `get_session_stats` with trend windows while preserving backward compatibility:
   - Add optional arguments for time windows (for example `last_24h`, `last_7d`, `last_30d`) and return aggregated trend points from SQLite.
   - Include per-tool and per-competitor rollups for session and cumulative scopes.
   - Preserve existing keys and response envelope shape so current clients keep working.
+  - Completed in loop `00001`: added optional `trend_windows` arguments to `get_session_stats`, calendar-aligned persisted trend aggregation for `last_24h`, `last_7d`, and `last_30d`, and zero-overhead defaults when callers do not request trend windows.
+  - Completed in loop `00001`: introduced explicit `session_rollups` and `total_rollups` alongside the existing top-level stats keys, preserving the legacy envelope while exposing per-tool and per-competitor breakdowns in a stable nested shape.
+  - Completed in loop `00001`: added runtime/store/orchestration coverage for persisted trend aggregation, SQLite call-event loading, and backward-compatible `get_session_stats` responses; verified with `go test ./src/internal/orchestration ./src/internal/telemetry ./src/internal/storage ./tests-go ./src/server -count=1` and `go vet ./src/internal/orchestration ./src/internal/telemetry ./src/internal/storage ./src/server ./tests-go`.
 
 - [ ] Strengthen pricing/profile normalization for Claude Code, Codex, and Amp:
   - Centralize competitor profile definitions and unit costs in one reusable module instead of scattering constants.

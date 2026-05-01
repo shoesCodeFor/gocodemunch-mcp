@@ -36,6 +36,7 @@ type Runtime struct {
 	store   SnapshotStore
 	now     func() time.Time
 	events  CallEventStore
+	loader  CallEventLoader
 
 	flushMu sync.Mutex
 	stateMu sync.Mutex
@@ -68,6 +69,9 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 	}
 	if eventStore, ok := cfg.Store.(CallEventStore); ok {
 		runtime.events = eventStore
+	}
+	if loader, ok := cfg.Store.(CallEventLoader); ok {
+		runtime.loader = loader
 	}
 
 	if cfg.Store != nil {
@@ -123,6 +127,40 @@ func (r *Runtime) CumulativeSnapshot() CumulativeSnapshot {
 		return CumulativeSnapshot{}
 	}
 	return r.tracker.CumulativeSnapshot()
+}
+
+// QueryTrends aggregates retained persisted call history for requested windows.
+func (r *Runtime) QueryTrends(
+	ctx context.Context,
+	query TrendQuery,
+) (map[string]TrendWindowSnapshot, error) {
+	if r == nil {
+		return map[string]TrendWindowSnapshot{}, nil
+	}
+
+	now := query.Now.UTC()
+	if now.IsZero() {
+		now = r.now().UTC()
+	}
+
+	normalizedQuery := TrendQuery{
+		Windows: query.Windows,
+		Now:     now,
+	}
+
+	pricing := map[string]Pricing{}
+	if r.tracker != nil {
+		pricing = r.tracker.pricing
+	}
+	if r.loader == nil {
+		return aggregateTrendWindows(nil, normalizedQuery, pricing)
+	}
+
+	events, err := r.loader.LoadCallEvents(ctx, earliestTrendWindowStart(normalizedQuery))
+	if err != nil {
+		return nil, err
+	}
+	return aggregateTrendWindows(events, normalizedQuery, pricing)
 }
 
 // Flush persists the latest cumulative snapshot when needed.

@@ -222,8 +222,12 @@ func ToolDefinitionsForLanguages(configuredLanguages []string) []Tool {
 		{
 			Name:        "get_session_stats",
 			Description: "Get token savings stats for current session.",
-			InputSchema: objectSchema(map[string]any{}),
-			Handler:     stub,
+			InputSchema: objectSchema(map[string]any{
+				"trend_windows": stringArrayProp(
+					"Optional persisted trend windows to include (supported: last_24h, last_7d, last_30d)",
+				),
+			}),
+			Handler: stub,
 		},
 		{
 			Name:        "get_dependency_graph",

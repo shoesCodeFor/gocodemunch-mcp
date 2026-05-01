@@ -325,6 +325,29 @@ func TestGetSessionStatsReturnsLiveSessionAndCumulativeTelemetry(t *testing.T) {
 	if _, ok := toolBreakdown["get_session_stats"]; !ok {
 		t.Fatalf("expected get_session_stats in session tool breakdown after stats call: %#v", toolBreakdown)
 	}
+	sessionRollups, ok := stats["session_rollups"].(telemetry.RollupSnapshot)
+	if !ok {
+		t.Fatalf("expected typed session_rollups on get_session_stats, got %#v", stats["session_rollups"])
+	}
+	if _, ok := sessionRollups.ToolBreakdown["telemetry_probe"]; !ok {
+		t.Fatalf("expected telemetry_probe in session_rollups.tool_breakdown: %#v", sessionRollups)
+	}
+	if _, ok := sessionRollups.CompetitorBreakdown["codex"]; !ok {
+		t.Fatalf("expected codex in session_rollups.competitor_breakdown: %#v", sessionRollups)
+	}
+	totalRollups, ok := stats["total_rollups"].(telemetry.RollupSnapshot)
+	if !ok {
+		t.Fatalf("expected typed total_rollups on get_session_stats, got %#v", stats["total_rollups"])
+	}
+	if _, ok := totalRollups.ToolBreakdown["seeded_tool"]; !ok {
+		t.Fatalf("expected seeded_tool in total_rollups.tool_breakdown: %#v", totalRollups)
+	}
+	if _, ok := totalRollups.CompetitorBreakdown["claude_code"]; !ok {
+		t.Fatalf("expected claude_code in total_rollups.competitor_breakdown: %#v", totalRollups)
+	}
+	if trends, ok := stats["trend_windows"].(map[string]telemetry.TrendWindowSnapshot); !ok || len(trends) != 0 {
+		t.Fatalf("expected empty typed trend_windows without a request, got %#v", stats["trend_windows"])
+	}
 
 	meta, ok := stats["_meta"].(map[string]any)
 	if !ok {
@@ -376,6 +399,15 @@ func TestGetSessionStatsReturnsStableZeroContractWithoutTelemetry(t *testing.T) 
 	if totalBreakdown, ok := stats["total_tool_breakdown"].(map[string]telemetry.ToolSnapshot); !ok || len(totalBreakdown) != 0 {
 		t.Fatalf("expected empty typed total_tool_breakdown without telemetry, got %#v", stats["total_tool_breakdown"])
 	}
+	if sessionRollups, ok := stats["session_rollups"].(telemetry.RollupSnapshot); !ok || len(sessionRollups.ToolBreakdown) != 0 {
+		t.Fatalf("expected empty typed session_rollups without telemetry, got %#v", stats["session_rollups"])
+	}
+	if totalRollups, ok := stats["total_rollups"].(telemetry.RollupSnapshot); !ok || len(totalRollups.ToolBreakdown) != 0 {
+		t.Fatalf("expected empty typed total_rollups without telemetry, got %#v", stats["total_rollups"])
+	}
+	if trends, ok := stats["trend_windows"].(map[string]telemetry.TrendWindowSnapshot); !ok || len(trends) != 0 {
+		t.Fatalf("expected empty typed trend_windows without telemetry, got %#v", stats["trend_windows"])
+	}
 
 	meta, ok := stats["_meta"].(map[string]any)
 	if !ok {
@@ -386,6 +418,128 @@ func TestGetSessionStatsReturnsStableZeroContractWithoutTelemetry(t *testing.T) 
 	}
 	if got := intFieldFromAny(t, meta["total_tokens_saved"]); got != 0 {
 		t.Fatalf("expected zero _meta.total_tokens_saved without telemetry, got %#v", meta)
+	}
+}
+
+func TestGetSessionStatsReturnsRequestedTrendWindowsFromPersistedTelemetry(t *testing.T) {
+	now := time.Date(2026, 5, 1, 20, 0, 0, 0, time.UTC)
+	store, err := storage.NewSQLiteTelemetryStoreWithOptions(t.TempDir(), storage.SQLiteTelemetryStoreOptions{
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("create telemetry store: %v", err)
+	}
+
+	if err := store.SaveCallEvents(context.Background(), []telemetry.PersistedCallEvent{
+		{
+			CapturedAt: now.Add(-2 * time.Hour),
+			Call: telemetry.CallSnapshot{
+				ToolName:          "search_text",
+				StartedAt:         now.Add(-2*time.Hour - time.Second),
+				FinishedAt:        now.Add(-2 * time.Hour),
+				RequestTokens:     24,
+				ResponseTokens:    16,
+				TotalTokens:       40,
+				InputTokensSaved:  9,
+				OutputTokensSaved: 6,
+				TokensSaved:       15,
+				LogicalCalls:      2,
+				CostAvoidedUSD: map[string]float64{
+					"claude_code": 0.000225,
+					"codex":       0.0000855,
+					"amp":         0.0000855,
+				},
+			},
+		},
+		{
+			CapturedAt: now.Add(-48 * time.Hour),
+			Call: telemetry.CallSnapshot{
+				ToolName:          "get_context_bundle",
+				StartedAt:         now.Add(-48*time.Hour - time.Second),
+				FinishedAt:        now.Add(-48 * time.Hour),
+				RequestTokens:     12,
+				ResponseTokens:    8,
+				TotalTokens:       20,
+				InputTokensSaved:  4,
+				OutputTokensSaved: 3,
+				TokensSaved:       7,
+				LogicalCalls:      1,
+				CostAvoidedUSD: map[string]float64{
+					"claude_code": 0.000087,
+					"codex":       0.00003,
+					"amp":         0.00003,
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("seed persisted telemetry events: %v", err)
+	}
+
+	runtime, err := telemetry.NewRuntime(telemetry.RuntimeConfig{
+		Pricing: testTelemetryPricing(),
+		Store:   store,
+		Now:     func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("create telemetry runtime: %v", err)
+	}
+	defer func() {
+		if err := runtime.Close(); err != nil {
+			t.Fatalf("close telemetry runtime: %v", err)
+		}
+	}()
+
+	service := New(testTelemetryConfig(), Dependencies{Telemetry: runtime})
+	service.tools["telemetry_probe"] = Tool{
+		Name:        "telemetry_probe",
+		Description: "test-only telemetry probe",
+		InputSchema: objectSchema(map[string]any{}),
+		Handler: func(_ context.Context, _ map[string]any) (map[string]any, error) {
+			return map[string]any{"ok": true}, nil
+		},
+	}
+
+	_ = service.CallTool(context.Background(), "telemetry_probe", map[string]any{})
+	stats := service.CallTool(context.Background(), "get_session_stats", map[string]any{
+		"trend_windows": []any{"last_24h", "last_7d"},
+	})
+
+	trends, ok := stats["trend_windows"].(map[string]telemetry.TrendWindowSnapshot)
+	if !ok {
+		t.Fatalf("expected typed trend_windows payload, got %#v", stats["trend_windows"])
+	}
+	if len(trends) != 2 {
+		t.Fatalf("expected two requested trend windows, got %#v", trends)
+	}
+
+	last24h := trends["last_24h"]
+	if last24h.CallCount != 2 || last24h.TokensSaved != 15 {
+		t.Fatalf("unexpected last_24h trend snapshot: %#v", last24h)
+	}
+	if tool := last24h.ToolBreakdown["search_text"]; tool.CallCount != 2 || tool.TokensSaved != 15 {
+		t.Fatalf("expected persisted search_text rollup in last_24h trend snapshot, got %#v", last24h.ToolBreakdown)
+	}
+	if competitor := last24h.CompetitorBreakdown["claude_code"]; competitor.CostAvoidedUSD != 0.000225 {
+		t.Fatalf("unexpected last_24h competitor breakdown: %#v", last24h.CompetitorBreakdown)
+	}
+
+	last7d := trends["last_7d"]
+	if last7d.CallCount != 3 || last7d.TokensSaved != 22 {
+		t.Fatalf("unexpected last_7d trend snapshot: %#v", last7d)
+	}
+	if tool := last7d.ToolBreakdown["get_context_bundle"]; tool.CallCount != 1 || tool.TokensSaved != 7 {
+		t.Fatalf("expected retained get_context_bundle event in last_7d trend snapshot, got %#v", last7d.ToolBreakdown)
+	}
+	if len(last7d.Points) != 8 {
+		t.Fatalf("expected calendar-aligned daily buckets for last_7d trend snapshot, got %#v", last7d.Points)
+	}
+
+	sessionRollups, ok := stats["session_rollups"].(telemetry.RollupSnapshot)
+	if !ok {
+		t.Fatalf("expected typed session_rollups in trend response, got %#v", stats["session_rollups"])
+	}
+	if _, ok := sessionRollups.ToolBreakdown["get_session_stats"]; !ok {
+		t.Fatalf("expected live session rollups to include get_session_stats call, got %#v", sessionRollups)
 	}
 }
 

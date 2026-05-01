@@ -74,7 +74,7 @@ func (s *Service) finalizeToolPayload(
 ) map[string]any {
 	callSnapshot, sessionSnapshot, cumulativeSnapshot := s.recordTelemetry(name, arguments, payload, startedAt)
 	payload = s.applySavingsMeta(payload, callSnapshot, cumulativeSnapshot)
-	if name == "get_session_stats" {
+	if name == "get_session_stats" && toolSucceeded(payload) {
 		payload = s.applySessionStatsPayload(payload, sessionSnapshot, cumulativeSnapshot)
 	}
 	return s.applyMetaPolicy(payload)
@@ -121,6 +121,12 @@ func (s *Service) applySessionStatsPayload(
 	payload["session_output_tokens_saved"] = session.OutputTokensSaved
 	payload["session_cost_avoided"] = session.CostAvoidedUSD
 	payload["tool_breakdown"] = session.ToolBreakdown
+	payload["session_rollups"] = telemetry.BuildRollupSnapshot(
+		session.InputTokensSaved,
+		session.OutputTokensSaved,
+		session.ToolBreakdown,
+		session.CostAvoidedUSD,
+	)
 	payload["total_tokens_saved"] = cumulative.TokensSaved
 	payload["total_calls"] = cumulative.CallCount
 	payload["total_sessions"] = cumulative.SessionCount
@@ -130,6 +136,16 @@ func (s *Service) applySessionStatsPayload(
 	payload["total_output_tokens_saved"] = cumulative.OutputTokensSaved
 	payload["total_cost_avoided"] = cumulative.CostAvoidedUSD
 	payload["total_tool_breakdown"] = cumulative.ToolBreakdown
+	payload["total_rollups"] = telemetry.BuildRollupSnapshot(
+		cumulative.InputTokensSaved,
+		cumulative.OutputTokensSaved,
+		cumulative.ToolBreakdown,
+		cumulative.CostAvoidedUSD,
+	)
+
+	if payload["trend_windows"] == nil {
+		payload["trend_windows"] = map[string]telemetry.TrendWindowSnapshot{}
+	}
 	return payload
 }
 
@@ -259,4 +275,19 @@ func recoverTelemetryValue[T any](fn func() T) (value T, ok bool) {
 
 	value = fn()
 	return value, true
+}
+
+func recoverTelemetryResult[T any](fn func() (T, error)) (value T, err error, ok bool) {
+	ok = true
+	defer func() {
+		if recover() != nil {
+			var zero T
+			value = zero
+			err = nil
+			ok = false
+		}
+	}()
+
+	value, err = fn()
+	return value, err, true
 }

@@ -455,3 +455,63 @@ func TestSQLiteTelemetryStoreCallEventRetentionPreservesSnapshots(t *testing.T) 
 		t.Fatalf("expected stale event to be compacted away, retained tool=%q", retainedTool)
 	}
 }
+
+func TestSQLiteTelemetryStoreLoadCallEventsSince(t *testing.T) {
+	now := time.Date(2026, 5, 3, 9, 0, 0, 0, time.UTC)
+	store, err := NewSQLiteTelemetryStoreWithOptions(t.TempDir(), SQLiteTelemetryStoreOptions{
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("create telemetry store: %v", err)
+	}
+
+	if err := store.SaveCallEvents(context.Background(), []telemetry.PersistedCallEvent{
+		{
+			CapturedAt: now.Add(-48 * time.Hour),
+			Call: telemetry.CallSnapshot{
+				ToolName:          "stale_tool",
+				StartedAt:         now.Add(-48*time.Hour - time.Second),
+				FinishedAt:        now.Add(-48 * time.Hour),
+				RequestTokens:     10,
+				ResponseTokens:    6,
+				TotalTokens:       16,
+				InputTokensSaved:  4,
+				OutputTokensSaved: 2,
+				TokensSaved:       6,
+				CostAvoidedUSD:    map[string]float64{"codex": 0.000018},
+			},
+		},
+		{
+			CapturedAt: now.Add(-3 * time.Hour),
+			Call: telemetry.CallSnapshot{
+				ToolName:          "fresh_tool",
+				StartedAt:         now.Add(-3*time.Hour - time.Second),
+				FinishedAt:        now.Add(-3 * time.Hour),
+				RequestTokens:     14,
+				ResponseTokens:    9,
+				TotalTokens:       23,
+				InputTokensSaved:  6,
+				OutputTokensSaved: 3,
+				TokensSaved:       9,
+				LogicalCalls:      2,
+				CostAvoidedUSD:    map[string]float64{"codex": 0.000027},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("save telemetry call events: %v", err)
+	}
+
+	events, err := store.LoadCallEvents(context.Background(), now.Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("load retained telemetry call events: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected exactly one retained call event in 24h window, got %#v", events)
+	}
+	if events[0].Call.ToolName != "fresh_tool" || events[0].Call.LogicalCalls != 2 {
+		t.Fatalf("unexpected filtered telemetry call event: %#v", events)
+	}
+	if got := events[0].Call.CostAvoidedUSD["codex"]; got != 0.000027 {
+		t.Fatalf("expected decoded cost_avoided_usd for fresh_tool event, got %#v", events[0].Call.CostAvoidedUSD)
+	}
+}

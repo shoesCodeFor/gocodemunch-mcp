@@ -179,6 +179,34 @@ func (s *SQLiteTelemetryStore) SaveCallEvents(
 	return lastErr
 }
 
+// LoadCallEvents returns retained telemetry events captured at or after since.
+func (s *SQLiteTelemetryStore) LoadCallEvents(
+	ctx context.Context,
+	since time.Time,
+) ([]telemetry.PersistedCallEvent, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if _, err := os.Stat(s.dbPath); err != nil {
+		if os.IsNotExist(err) {
+			return []telemetry.PersistedCallEvent{}, nil
+		}
+		return nil, fmt.Errorf("stat telemetry db: %w", err)
+	}
+
+	db, err := s.openDB()
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	currentTime := time.Now().UTC()
+	if s.now != nil {
+		currentTime = s.now().UTC()
+	}
+	return loadSQLiteTelemetryCallEvents(ctx, db, since.UTC(), currentTime)
+}
+
 func (s *SQLiteTelemetryStore) openDB() (*sql.DB, error) {
 	db, err := sql.Open("sqlite", s.dbPath)
 	if err != nil {
@@ -505,6 +533,116 @@ func saveSQLiteTelemetryCallEvents(
 		return fmt.Errorf("commit telemetry sqlite call-event tx: %w", err)
 	}
 	return nil
+}
+
+func loadSQLiteTelemetryCallEvents(
+	ctx context.Context,
+	db *sql.DB,
+	since time.Time,
+	fallback time.Time,
+) ([]telemetry.PersistedCallEvent, error) {
+	query := `SELECT
+		captured_at,
+		tool_name,
+		started_at,
+		finished_at,
+		logical_calls,
+		request_tokens,
+		response_tokens,
+		total_tokens,
+		input_tokens_saved,
+		output_tokens_saved,
+		tokens_saved,
+		cost_avoided_usd
+	FROM call_events`
+	args := []any{}
+	if !since.IsZero() {
+		query += ` WHERE captured_at >= ?`
+		args = append(args, since.Format(time.RFC3339Nano))
+	}
+	query += ` ORDER BY captured_at ASC, event_id ASC`
+
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("load telemetry sqlite call events: %w", err)
+	}
+	defer rows.Close()
+
+	events := make([]telemetry.PersistedCallEvent, 0, 32)
+	for rows.Next() {
+		var (
+			capturedAtRaw      string
+			toolName           string
+			startedAtRaw       string
+			finishedAtRaw      string
+			logicalCalls       int
+			requestTokens      int
+			responseTokens     int
+			totalTokens        int
+			inputTokensSaved   int
+			outputTokensSaved  int
+			tokensSaved        int
+			costAvoidedUSDJSON string
+		)
+		if err := rows.Scan(
+			&capturedAtRaw,
+			&toolName,
+			&startedAtRaw,
+			&finishedAtRaw,
+			&logicalCalls,
+			&requestTokens,
+			&responseTokens,
+			&totalTokens,
+			&inputTokensSaved,
+			&outputTokensSaved,
+			&tokensSaved,
+			&costAvoidedUSDJSON,
+		); err != nil {
+			return nil, fmt.Errorf("scan telemetry sqlite call event: %w", err)
+		}
+
+		capturedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(capturedAtRaw))
+		if err != nil {
+			return nil, fmt.Errorf("parse telemetry call event captured_at %q: %w", capturedAtRaw, err)
+		}
+		startedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(startedAtRaw))
+		if err != nil {
+			return nil, fmt.Errorf("parse telemetry call event started_at %q: %w", startedAtRaw, err)
+		}
+		finishedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(finishedAtRaw))
+		if err != nil {
+			return nil, fmt.Errorf("parse telemetry call event finished_at %q: %w", finishedAtRaw, err)
+		}
+
+		costAvoidedUSD := map[string]float64{}
+		if strings.TrimSpace(costAvoidedUSDJSON) != "" {
+			if err := json.Unmarshal([]byte(costAvoidedUSDJSON), &costAvoidedUSD); err != nil {
+				return nil, fmt.Errorf("decode telemetry call event cost_avoided_usd: %w", err)
+			}
+		}
+
+		events = append(events, normalizePersistedCallEvent(telemetry.PersistedCallEvent{
+			CapturedAt: capturedAt,
+			Call: telemetry.CallSnapshot{
+				ToolName:          toolName,
+				StartedAt:         startedAt,
+				FinishedAt:        finishedAt,
+				RequestTokens:     requestTokens,
+				ResponseTokens:    responseTokens,
+				TotalTokens:       totalTokens,
+				InputTokensSaved:  inputTokensSaved,
+				OutputTokensSaved: outputTokensSaved,
+				TokensSaved:       tokensSaved,
+				LogicalCalls:      logicalCalls,
+				CostAvoidedUSD:    costAvoidedUSD,
+			},
+		}, fallback))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate telemetry sqlite call events: %w", err)
+	}
+
+	return events, nil
 }
 
 func compactSQLiteTelemetryCallEvents(

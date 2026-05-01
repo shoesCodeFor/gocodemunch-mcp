@@ -386,14 +386,103 @@ func TestRuntimeFlushPersistsCallEventsAndRequeuesOnFailure(t *testing.T) {
 	}
 }
 
+func TestRuntimeQueryTrendsAggregatesPersistedCallEvents(t *testing.T) {
+	now := time.Date(2026, 5, 1, 18, 0, 0, 0, time.UTC)
+	store := &runtimeStoreStub{
+		loadedEvents: []PersistedCallEvent{
+			{
+				CapturedAt: now.Add(-2 * time.Hour),
+				Call: CallSnapshot{
+					ToolName:          "search_text",
+					StartedAt:         now.Add(-2*time.Hour - 2*time.Second),
+					FinishedAt:        now.Add(-2 * time.Hour),
+					RequestTokens:     12,
+					ResponseTokens:    8,
+					TotalTokens:       20,
+					InputTokensSaved:  5,
+					OutputTokensSaved: 3,
+					TokensSaved:       8,
+					LogicalCalls:      2,
+					CostAvoidedUSD: map[string]float64{
+						"codex": 0.0000255,
+					},
+				},
+			},
+			{
+				CapturedAt: now.Add(-36 * time.Hour),
+				Call: CallSnapshot{
+					ToolName:          "get_context_bundle",
+					StartedAt:         now.Add(-36*time.Hour - 3*time.Second),
+					FinishedAt:        now.Add(-36 * time.Hour),
+					RequestTokens:     20,
+					ResponseTokens:    10,
+					TotalTokens:       30,
+					InputTokensSaved:  7,
+					OutputTokensSaved: 4,
+					TokensSaved:       11,
+					LogicalCalls:      1,
+					CostAvoidedUSD: map[string]float64{
+						"codex": 0.0000345,
+					},
+				},
+			},
+		},
+	}
+
+	runtime, err := NewRuntime(RuntimeConfig{
+		Pricing: map[string]Pricing{
+			"codex": {InputUSDPerMTok: 1.5, OutputUSDPerMTok: 6},
+		},
+		Store: store,
+		Now:   func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("create runtime: %v", err)
+	}
+
+	trends, err := runtime.QueryTrends(context.Background(), TrendQuery{
+		Windows: []TrendWindow{TrendWindowLast24H, TrendWindowLast7D},
+	})
+	if err != nil {
+		t.Fatalf("query trends: %v", err)
+	}
+
+	last24h := trends[string(TrendWindowLast24H)]
+	if last24h.CallCount != 2 || last24h.TokensSaved != 8 {
+		t.Fatalf("unexpected last_24h trend snapshot: %#v", last24h)
+	}
+	if tool := last24h.ToolBreakdown["search_text"]; tool.CallCount != 2 || tool.TokensSaved != 8 {
+		t.Fatalf("expected last_24h per-tool rollup for search_text, got %#v", last24h.ToolBreakdown)
+	}
+	if competitor := last24h.CompetitorBreakdown["codex"]; competitor.CostAvoidedUSD != 0.0000255 {
+		t.Fatalf("unexpected last_24h competitor rollup: %#v", last24h.CompetitorBreakdown)
+	}
+
+	last7d := trends[string(TrendWindowLast7D)]
+	if last7d.CallCount != 3 || last7d.TokensSaved != 19 {
+		t.Fatalf("unexpected last_7d trend snapshot: %#v", last7d)
+	}
+	if tool := last7d.ToolBreakdown["get_context_bundle"]; tool.CallCount != 1 || tool.TokensSaved != 11 {
+		t.Fatalf("expected last_7d rollup to include persisted get_context_bundle event, got %#v", last7d.ToolBreakdown)
+	}
+	if len(last7d.Points) != 8 {
+		t.Fatalf("expected calendar-aligned daily buckets for last_7d window, got %#v", last7d.Points)
+	}
+	if loadedSince := store.lastLoadedSince(); !loadedSince.Equal(now.Add(-7 * 24 * time.Hour)) {
+		t.Fatalf("expected loader to read from earliest requested window, got %s", loadedSince)
+	}
+}
+
 type runtimeStoreStub struct {
-	mu        sync.Mutex
-	load      PersistedCumulativeSnapshot
-	loadErr   error
-	saves     []PersistedCumulativeSnapshot
-	saveCh    chan PersistedCumulativeSnapshot
-	events    [][]PersistedCallEvent
-	eventErrs []error
+	mu           sync.Mutex
+	load         PersistedCumulativeSnapshot
+	loadErr      error
+	saves        []PersistedCumulativeSnapshot
+	saveCh       chan PersistedCumulativeSnapshot
+	events       [][]PersistedCallEvent
+	eventErrs    []error
+	loadedEvents []PersistedCallEvent
+	loadedSince  []time.Time
 }
 
 func (s *runtimeStoreStub) LoadLatestSnapshot(_ context.Context) (PersistedCumulativeSnapshot, error) {
@@ -440,6 +529,24 @@ func (s *runtimeStoreStub) SaveCallEvents(
 	return nil
 }
 
+func (s *runtimeStoreStub) LoadCallEvents(
+	_ context.Context,
+	since time.Time,
+) ([]PersistedCallEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.loadedSince = append(s.loadedSince, since)
+	events := make([]PersistedCallEvent, 0, len(s.loadedEvents))
+	for _, event := range s.loadedEvents {
+		if event.CapturedAt.Before(since) {
+			continue
+		}
+		events = append(events, event)
+	}
+	return events, nil
+}
+
 func (s *runtimeStoreStub) saveCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -450,6 +557,15 @@ func (s *runtimeStoreStub) eventBatchCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.events)
+}
+
+func (s *runtimeStoreStub) lastLoadedSince() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.loadedSince) == 0 {
+		return time.Time{}
+	}
+	return s.loadedSince[len(s.loadedSince)-1]
 }
 
 func almostEqual(left, right float64) bool {

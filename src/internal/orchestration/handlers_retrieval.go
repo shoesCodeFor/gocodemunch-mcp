@@ -21,6 +21,7 @@ import (
 
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/domain/indexing"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/storage"
+	"github.com/jgravelle/gocodemunch-mcp/src/internal/telemetry"
 )
 
 const (
@@ -1683,15 +1684,31 @@ func (s *Service) handleGetSymbolSource(ctx context.Context, arguments map[strin
 	return result, nil
 }
 
-func (s *Service) handleGetSessionStats(_ context.Context, _ map[string]any) (map[string]any, error) {
-	session := s.zeroSessionSnapshot()
-	cumulative := s.zeroCumulativeSnapshot()
-	if s.deps.Telemetry != nil {
-		session = s.normalizeSessionSnapshot(s.deps.Telemetry.SessionSnapshot())
-		cumulative = s.normalizeCumulativeSnapshot(s.deps.Telemetry.CumulativeSnapshot())
+func (s *Service) handleGetSessionStats(ctx context.Context, arguments map[string]any) (map[string]any, error) {
+	windows, err := requestedTrendWindows(arguments)
+	if err != nil {
+		return map[string]any{"error": fmt.Sprintf("Input validation error: %s", err.Error())}, nil
 	}
 
-	return s.applySessionStatsPayload(nil, session, cumulative), nil
+	payload := map[string]any{
+		"trend_windows": map[string]telemetry.TrendWindowSnapshot{},
+	}
+	if len(windows) == 0 || s.deps.Telemetry == nil {
+		return payload, nil
+	}
+
+	reader, ok := s.deps.Telemetry.(telemetry.TrendReader)
+	if !ok {
+		return payload, nil
+	}
+
+	trends, queryErr, ok := recoverTelemetryResult(func() (map[string]telemetry.TrendWindowSnapshot, error) {
+		return reader.QueryTrends(ctx, telemetry.TrendQuery{Windows: windows})
+	})
+	if ok && queryErr == nil {
+		payload["trend_windows"] = trends
+	}
+	return payload, nil
 }
 
 func (s *Service) handleGetDependencyGraph(ctx context.Context, arguments map[string]any) (map[string]any, error) {
@@ -4815,6 +4832,14 @@ func optionalRawStringSliceArg(arguments map[string]any, key string) ([]string, 
 	default:
 		return nil, false
 	}
+}
+
+func requestedTrendWindows(arguments map[string]any) ([]telemetry.TrendWindow, error) {
+	raw, ok := optionalRawStringSliceArg(arguments, "trend_windows")
+	if !ok || len(raw) == 0 {
+		return []telemetry.TrendWindow{}, nil
+	}
+	return telemetry.ParseTrendWindows(raw)
 }
 
 func resolveRepoArgument(ctx context.Context, store storage.IndexStore, repo string) (string, bool, error) {
