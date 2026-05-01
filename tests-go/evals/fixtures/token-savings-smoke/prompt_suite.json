@@ -1,0 +1,78 @@
+{
+  "dataset": "token-savings-smoke",
+  "suite_version": "v1",
+  "cases": [
+    {
+      "id": "tree-app-files",
+      "prompt": "Show me the indexed files under the app folder.",
+      "tool": "get_file_tree",
+      "arguments": {
+        "path_prefix": "app"
+      },
+      "context_files": [
+        "pkg/config.py",
+        "pkg/http_client.py",
+        "app/main.py",
+        "app/reporting.py"
+      ]
+    },
+    {
+      "id": "outline-http-client",
+      "prompt": "Outline the HTTP client implementation.",
+      "tool": "get_file_outline",
+      "arguments": {
+        "file_path": "pkg/http_client.py"
+      },
+      "context_files": [
+        "pkg/config.py",
+        "pkg/http_client.py"
+      ]
+    },
+    {
+      "id": "importers-http-client",
+      "prompt": "Which files import the HTTP client module?",
+      "tool": "find_importers",
+      "arguments": {
+        "file_path": "pkg/http_client.py",
+        "max_results": 10
+      },
+      "context_files": [
+        "pkg/config.py",
+        "pkg/http_client.py",
+        "app/main.py",
+        "app/reporting.py"
+      ]
+    },
+    {
+      "id": "references-load-config",
+      "prompt": "Find references to load_config.",
+      "tool": "find_references",
+      "arguments": {
+        "identifier": "load_config",
+        "max_results": 10
+      },
+      "context_files": [
+        "pkg/config.py",
+        "pkg/http_client.py",
+        "app/main.py",
+        "app/reporting.py"
+      ]
+    },
+    {
+      "id": "search-timeout-seconds",
+      "prompt": "Find the timeout_seconds usage.",
+      "tool": "search_text",
+      "arguments": {
+        "query": "timeout_seconds",
+        "context_lines": 1,
+        "max_results": 5
+      },
+      "context_files": [
+        "pkg/config.py",
+        "pkg/http_client.py",
+        "app/main.py",
+        "app/reporting.py"
+      ]
+    }
+  ]
+}

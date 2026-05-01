@@ -22,10 +22,12 @@ This phase delivers a fully autonomous vertical slice: the MCP runtime estimates
   - Populate `_meta.tokens_saved` and `_meta.total_tokens_saved` with real values while preserving existing response envelope compatibility.
   - Completed in loop `00001`: added centralized successful-call telemetry instrumentation in `src/internal/orchestration/service.go` plus `src/internal/orchestration/service_telemetry.go`, replaced the `get_session_stats` stub with live session/cumulative snapshots keyed by `claude_code`, `codex`, and `amp`, and added orchestration + stdio integration coverage in `src/internal/orchestration/service_telemetry_test.go` and `tests-go/indexing_tools_test.go`.
 
-- [ ] Build an autonomous token-savings smoke benchmark path in the eval CLI:
+- [x] Build an autonomous token-savings smoke benchmark path in the eval CLI:
   - Reuse `src/cmd/gocodemunch-eval/main.go` matrix/report flow to add a `token-savings-smoke` mode that runs a fixed prompt suite in both `with_mcp` and `without_mcp` modes.
   - Add fixture inputs for the fixed prompt suite under existing eval fixture conventions so no user-authored prompts are required during execution.
   - Score token and cost deltas per competitor (`claude_code`, `codex`, `amp`) and write JSON output to `Auto Run Docs/Working/evals/token-savings-smoke.json`.
+  - Completed in loop `00001`: added `--mode token-savings-smoke` in `src/cmd/gocodemunch-eval`, a deterministic prompt suite under `tests-go/evals/fixtures/token-savings-smoke`, and a real MCP-vs-raw-context scorer that emits per-case plus aggregate token/cost deltas for `claude_code`, `codex`, and `amp`.
+  - Completed in loop `00001`: added `make eval-savings-smoke`, verified `Auto Run Docs/Working/evals/token-savings-smoke.json` is generated end-to-end, and added coverage in `src/cmd/gocodemunch-eval/main_test.go` plus `tests-go/token_savings_fixtures_test.go`.
 
 - [ ] Emit structured Markdown savings artifacts compatible with DocGraph navigation:
   - Extend report rendering to write savings Markdown run reports with YAML front matter (`type`, `title`, `created`, `tags`, `related`) and wiki-links.

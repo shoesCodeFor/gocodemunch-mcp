@@ -143,6 +143,196 @@ func TestRunWithArgsEmitsPerQueryAndAggregateMetrics(t *testing.T) {
 	}
 }
 
+func TestRunWithArgsTokenSavingsSmokeEmitsSavingsReport(t *testing.T) {
+	fixturesDir := writeTokenSavingsFixtures(t, fixtureCorpus{
+		Dataset: "token-savings-smoke-test",
+		Documents: []fixtureDocument{
+			{
+				ID:       "pkg-config",
+				Path:     "pkg/config.py",
+				Language: "python",
+				Text:     "DEFAULT_TIMEOUT_SECONDS = 5\n\nclass RuntimeConfig:\n    def __init__(self, base_url: str, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS) -> None:\n        self.base_url = base_url\n        self.timeout_seconds = timeout_seconds\n\ndef load_config(base_url: str) -> RuntimeConfig:\n    return RuntimeConfig(base_url=base_url)\n",
+			},
+			{
+				ID:       "pkg-http-client",
+				Path:     "pkg/http_client.py",
+				Language: "python",
+				Text:     "from pkg.config import RuntimeConfig\n\nclass HTTPClient:\n    def __init__(self, config: RuntimeConfig) -> None:\n        self.config = config\n\n    def get_status(self) -> str:\n        timeout_seconds = self.config.timeout_seconds\n        return f\"GET {self.config.base_url}/status timeout={timeout_seconds}\"\n",
+			},
+			{
+				ID:       "app-main",
+				Path:     "app/main.py",
+				Language: "python",
+				Text:     "from pkg.config import load_config\nfrom pkg.http_client import HTTPClient\n\ndef run() -> str:\n    config = load_config(\"https://example.test\")\n    client = HTTPClient(config)\n    return client.get_status()\n",
+			},
+			{
+				ID:       "app-reporting",
+				Path:     "app/reporting.py",
+				Language: "python",
+				Text:     "from pkg.http_client import HTTPClient\n\ndef build_report(client: HTTPClient) -> str:\n    status_line = client.get_status()\n    return f\"report::{status_line}\"\n",
+			},
+		},
+	}, tokenSavingsPromptSuiteFile{
+		Dataset:      "token-savings-smoke-test",
+		SuiteVersion: "v-test",
+		Cases: []tokenSavingsCaseFixture{
+			{
+				ID:     "tree-app-files",
+				Prompt: "Show me the indexed files under the app folder.",
+				Tool:   "get_file_tree",
+				Arguments: map[string]any{
+					"path_prefix": "app",
+				},
+				ContextFiles: []string{"pkg/config.py", "pkg/http_client.py", "app/main.py", "app/reporting.py"},
+			},
+			{
+				ID:     "outline-http-client",
+				Prompt: "Outline the HTTP client implementation.",
+				Tool:   "get_file_outline",
+				Arguments: map[string]any{
+					"file_path": "pkg/http_client.py",
+				},
+				ContextFiles: []string{"pkg/config.py", "pkg/http_client.py"},
+			},
+			{
+				ID:     "importers-http-client",
+				Prompt: "Which files import the HTTP client module?",
+				Tool:   "find_importers",
+				Arguments: map[string]any{
+					"file_path":   "pkg/http_client.py",
+					"max_results": 10,
+				},
+				ContextFiles: []string{"pkg/config.py", "pkg/http_client.py", "app/main.py", "app/reporting.py"},
+			},
+			{
+				ID:     "search-timeout-seconds",
+				Prompt: "Find the timeout_seconds usage.",
+				Tool:   "search_text",
+				Arguments: map[string]any{
+					"query":         "timeout_seconds",
+					"context_lines": 1,
+					"max_results":   5,
+				},
+				ContextFiles: []string{"pkg/config.py", "pkg/http_client.py", "app/main.py", "app/reporting.py"},
+			},
+		},
+	})
+
+	restore := overrideEvalRunnerHooks(
+		func() (config.Config, error) {
+			return config.Config{
+				StoragePath: t.TempDir(),
+				Disabled:    map[string]struct{}{},
+				SavingsCompetitorPricing: map[string]config.SavingsCompetitorPricing{
+					"claude_code": {InputUSDPerMTok: 3.0, OutputUSDPerMTok: 15.0},
+					"codex":       {InputUSDPerMTok: 1.5, OutputUSDPerMTok: 6.0},
+					"amp":         {InputUSDPerMTok: 1.5, OutputUSDPerMTok: 6.0},
+				},
+			}, nil
+		},
+		createBackendFn,
+		createEmbedderFn,
+		closeBackendFn,
+		func() time.Time { return time.Date(2026, time.May, 1, 9, 30, 0, 0, time.UTC) },
+	)
+	defer restore()
+
+	outPath := filepath.Join(t.TempDir(), "outputs", "token-savings-smoke.json")
+	args := []string{
+		"--mode", "token-savings-smoke",
+		"--fixtures-dir", fixturesDir,
+		"--out", outPath,
+		"--skip-markdown-report",
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := runWithArgs(args, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected success exit code 0, got %d stderr=%s", code, stderr.String())
+	}
+
+	report := tokenSavingsSmokeReport{}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("decode token savings report: %v output=%s", err, stdout.String())
+	}
+
+	if report.Mode != "token-savings-smoke" {
+		t.Fatalf("expected token-savings-smoke mode, got %#v", report)
+	}
+	if report.Dataset != "token-savings-smoke-test" || report.SuiteVersion != "v-test" {
+		t.Fatalf("unexpected token savings suite identity: %#v", report)
+	}
+	if report.Aggregate.CaseCount != 4 {
+		t.Fatalf("expected 4 token savings cases, got %#v", report.Aggregate)
+	}
+	if len(report.Cases) != 4 {
+		t.Fatalf("expected 4 token savings case rows, got %#v", report.Cases)
+	}
+	if report.Aggregate.Savings.TokensSaved <= 0 {
+		t.Fatalf("expected aggregate tokens_saved to be positive, got %#v", report.Aggregate)
+	}
+	if report.Aggregate.WithMCP.TotalTokens >= report.Aggregate.WithoutMCP.TotalTokens {
+		t.Fatalf("expected with_mcp total tokens to stay below without_mcp, got %#v", report.Aggregate)
+	}
+
+	for _, competitor := range []string{"claude_code", "codex", "amp"} {
+		if _, ok := report.Aggregate.WithMCP.CostUSD[competitor]; !ok {
+			t.Fatalf("expected %s in aggregate with_mcp cost map: %#v", competitor, report.Aggregate.WithMCP)
+		}
+		if _, ok := report.Aggregate.WithoutMCP.CostUSD[competitor]; !ok {
+			t.Fatalf("expected %s in aggregate without_mcp cost map: %#v", competitor, report.Aggregate.WithoutMCP)
+		}
+		if _, ok := report.Aggregate.Savings.CostSavedUSD[competitor]; !ok {
+			t.Fatalf("expected %s in aggregate savings cost map: %#v", competitor, report.Aggregate.Savings)
+		}
+	}
+
+	for _, row := range report.Cases {
+		if row.WithMCP.TotalTokens >= row.WithoutMCP.TotalTokens {
+			t.Fatalf("expected per-case savings for %q, got %#v", row.ID, row)
+		}
+		if row.Savings.TokensSaved <= 0 {
+			t.Fatalf("expected positive per-case tokens_saved for %q, got %#v", row.ID, row)
+		}
+	}
+
+	writtenPayload, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read token savings output file: %v", err)
+	}
+	writtenReport := tokenSavingsSmokeReport{}
+	if err := json.Unmarshal(writtenPayload, &writtenReport); err != nil {
+		t.Fatalf("decode written token savings report: %v", err)
+	}
+	if writtenReport.Aggregate.Savings.TokensSaved != report.Aggregate.Savings.TokensSaved {
+		t.Fatalf("expected written report to match stdout report, stdout=%#v written=%#v", report.Aggregate, writtenReport.Aggregate)
+	}
+}
+
+func TestRunWithArgsRejectsUnsupportedMode(t *testing.T) {
+	restore := overrideEvalRunnerHooks(
+		func() (config.Config, error) {
+			return config.Config{}, nil
+		},
+		createBackendFn,
+		createEmbedderFn,
+		closeBackendFn,
+		nowUTCFn,
+	)
+	defer restore()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runWithArgs([]string{"--mode", "not-a-real-mode"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("expected invalid-input exit code 2, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "unsupported mode") {
+		t.Fatalf("expected unsupported mode error, stderr=%s", stderr.String())
+	}
+}
+
 func TestRunWithArgsRejectsUnsupportedProvider(t *testing.T) {
 	fixturesDir := writeEvalFixtures(t, fixtureCorpus{
 		Dataset:   "eval-fixtures-test",
@@ -797,6 +987,19 @@ func writeEvalFixtures(
 	writeJSONFile(t, filepath.Join(dir, "corpus.json"), corpus)
 	writeJSONFile(t, filepath.Join(dir, "queries.json"), queries)
 	writeJSONFile(t, filepath.Join(dir, "relevance.json"), relevance)
+	return dir
+}
+
+func writeTokenSavingsFixtures(
+	t *testing.T,
+	corpus fixtureCorpus,
+	suite tokenSavingsPromptSuiteFile,
+) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	writeJSONFile(t, filepath.Join(dir, "corpus.json"), corpus)
+	writeJSONFile(t, filepath.Join(dir, tokenSavingsPromptSuiteFileName), suite)
 	return dir
 }
 

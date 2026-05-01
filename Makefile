@@ -1,4 +1,4 @@
-.PHONY: help build build-all build-mcp build-parity build-slo-bench test smoke vector-up vector-down vector-health vector-smoke eval-smoke eval-matrix eval-gate bench race fmt clean
+.PHONY: help build build-all build-mcp build-parity build-slo-bench test smoke vector-up vector-down vector-health vector-smoke eval-smoke eval-matrix eval-gate eval-savings-smoke bench race fmt clean
 
 BINDIR := bin
 MCP_BIN := $(BINDIR)/gocodemunch-mcp
@@ -8,6 +8,7 @@ VECTOR_COMPOSE_FILE := docker-compose.vector.yml
 DOCKER_COMPOSE ?= docker compose
 EVAL_CMD := go run ./src/cmd/gocodemunch-eval
 EVAL_FIXTURES_DIR ?= tests-go/evals/fixtures
+EVAL_TOKEN_SAVINGS_FIXTURES_DIR ?= tests-go/evals/fixtures/token-savings-smoke
 EVAL_NAMESPACE_PREFIX ?= eval-fixtures
 EVAL_MARKDOWN_REPORT_DIR ?= docs/evals/runs
 EVAL_OUTPUT_DIR ?= Auto Run Docs/Working/evals
@@ -38,6 +39,7 @@ help:
 	@printf "  make eval-smoke     Run non-interactive eval smoke (ollama/sqlite default)\n"
 	@printf "  make eval-matrix    Run non-interactive eval matrix (ollama,vllm x sqlite,qdrant default)\n"
 	@printf "  make eval-gate      Run non-interactive eval matrix with default thresholds (0.70 recall/mrr, 5000ms p50/p95)\n"
+	@printf "  make eval-savings-smoke Run token savings smoke benchmark and write JSON output\n"
 	@printf "  make fmt            Run gofmt across the repo\n"
 	@printf "  make clean          Remove built binaries\n"
 	@printf "  make bench          Run benchmark script\n"
@@ -114,6 +116,14 @@ eval-gate:
 		--max-p50-latency-ms "$(EVAL_GATE_MAX_P50_LATENCY_MS)" \
 		--max-p95-latency-ms "$(EVAL_GATE_MAX_P95_LATENCY_MS)" \
 		--out "$(EVAL_OUTPUT_DIR)/eval-gate.json" \
+		--skip-markdown-report
+
+eval-savings-smoke:
+	mkdir -p "$(EVAL_OUTPUT_DIR)"
+	$(EVAL_CMD) \
+		--mode token-savings-smoke \
+		--fixtures-dir "$(EVAL_TOKEN_SAVINGS_FIXTURES_DIR)" \
+		--out "$(EVAL_OUTPUT_DIR)/token-savings-smoke.json" \
 		--skip-markdown-report
 
 fmt:

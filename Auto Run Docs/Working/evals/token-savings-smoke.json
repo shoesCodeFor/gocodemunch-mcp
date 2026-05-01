@@ -1,0 +1,289 @@
+{
+  "generated_at_utc": "2026-05-01T06:58:56Z",
+  "mode": "token-savings-smoke",
+  "dataset": "token-savings-smoke",
+  "suite_version": "v1",
+  "fixtures_dir": "tests-go/evals/fixtures/token-savings-smoke",
+  "indexed_repo": "local/gocodemunch-token-savings-2454131706-c578c524",
+  "file_count": 4,
+  "competitor_pricing_usd_per_mtok": {
+    "amp": {
+      "InputUSDPerMTok": 1.5,
+      "OutputUSDPerMTok": 6
+    },
+    "claude_code": {
+      "InputUSDPerMTok": 3,
+      "OutputUSDPerMTok": 15
+    },
+    "codex": {
+      "InputUSDPerMTok": 1.5,
+      "OutputUSDPerMTok": 6
+    }
+  },
+  "cases": [
+    {
+      "id": "tree-app-files",
+      "prompt": "Show me the indexed files under the app folder.",
+      "tool": "get_file_tree",
+      "tool_arguments": {
+        "path_prefix": "app"
+      },
+      "context_files": [
+        "pkg/config.py",
+        "pkg/http_client.py",
+        "app/main.py",
+        "app/reporting.py"
+      ],
+      "with_mcp": {
+        "input_tokens": 45,
+        "output_tokens": 72,
+        "total_tokens": 117,
+        "tool_request_tokens": 30,
+        "tool_response_tokens": 72,
+        "cost_usd": {
+          "amp": 0.0001755,
+          "claude_code": 0.000351,
+          "codex": 0.0001755
+        }
+      },
+      "without_mcp": {
+        "input_tokens": 321,
+        "output_tokens": 0,
+        "total_tokens": 321,
+        "context_tokens": 306,
+        "cost_usd": {
+          "amp": 0.0004815,
+          "claude_code": 0.000963,
+          "codex": 0.0004815
+        }
+      },
+      "savings": {
+        "tokens_saved": 204,
+        "savings_pct": 0.635514,
+        "cost_saved_usd": {
+          "amp": 0.000306,
+          "claude_code": 0.000612,
+          "codex": 0.000306
+        }
+      }
+    },
+    {
+      "id": "outline-http-client",
+      "prompt": "Outline the HTTP client implementation.",
+      "tool": "get_file_outline",
+      "tool_arguments": {
+        "file_path": "pkg/http_client.py"
+      },
+      "context_files": [
+        "pkg/config.py",
+        "pkg/http_client.py"
+      ],
+      "with_mcp": {
+        "input_tokens": 47,
+        "output_tokens": 74,
+        "total_tokens": 121,
+        "tool_request_tokens": 34,
+        "tool_response_tokens": 74,
+        "cost_usd": {
+          "amp": 0.0001815,
+          "claude_code": 0.000363,
+          "codex": 0.0001815
+        }
+      },
+      "without_mcp": {
+        "input_tokens": 203,
+        "output_tokens": 0,
+        "total_tokens": 203,
+        "context_tokens": 191,
+        "cost_usd": {
+          "amp": 0.0003045,
+          "claude_code": 0.000609,
+          "codex": 0.0003045
+        }
+      },
+      "savings": {
+        "tokens_saved": 82,
+        "savings_pct": 0.403941,
+        "cost_saved_usd": {
+          "amp": 0.000123,
+          "claude_code": 0.000246,
+          "codex": 0.000123
+        }
+      }
+    },
+    {
+      "id": "importers-http-client",
+      "prompt": "Which files import the HTTP client module?",
+      "tool": "find_importers",
+      "tool_arguments": {
+        "file_path": "pkg/http_client.py",
+        "max_results": 10
+      },
+      "context_files": [
+        "pkg/config.py",
+        "pkg/http_client.py",
+        "app/main.py",
+        "app/reporting.py"
+      ],
+      "with_mcp": {
+        "input_tokens": 52,
+        "output_tokens": 134,
+        "total_tokens": 186,
+        "tool_request_tokens": 38,
+        "tool_response_tokens": 134,
+        "cost_usd": {
+          "amp": 0.000279,
+          "claude_code": 0.000558,
+          "codex": 0.000279
+        }
+      },
+      "without_mcp": {
+        "input_tokens": 320,
+        "output_tokens": 0,
+        "total_tokens": 320,
+        "context_tokens": 306,
+        "cost_usd": {
+          "amp": 0.00048,
+          "claude_code": 0.00096,
+          "codex": 0.00048
+        }
+      },
+      "savings": {
+        "tokens_saved": 134,
+        "savings_pct": 0.41875,
+        "cost_saved_usd": {
+          "amp": 0.000201,
+          "claude_code": 0.000402,
+          "codex": 0.000201
+        }
+      }
+    },
+    {
+      "id": "references-load-config",
+      "prompt": "Find references to load_config.",
+      "tool": "find_references",
+      "tool_arguments": {
+        "identifier": "load_config",
+        "max_results": 10
+      },
+      "context_files": [
+        "pkg/config.py",
+        "pkg/http_client.py",
+        "app/main.py",
+        "app/reporting.py"
+      ],
+      "with_mcp": {
+        "input_tokens": 48,
+        "output_tokens": 109,
+        "total_tokens": 157,
+        "tool_request_tokens": 37,
+        "tool_response_tokens": 109,
+        "cost_usd": {
+          "amp": 0.0002355,
+          "claude_code": 0.000471,
+          "codex": 0.0002355
+        }
+      },
+      "without_mcp": {
+        "input_tokens": 317,
+        "output_tokens": 0,
+        "total_tokens": 317,
+        "context_tokens": 306,
+        "cost_usd": {
+          "amp": 0.0004755,
+          "claude_code": 0.000951,
+          "codex": 0.0004755
+        }
+      },
+      "savings": {
+        "tokens_saved": 160,
+        "savings_pct": 0.504732,
+        "cost_saved_usd": {
+          "amp": 0.00024,
+          "claude_code": 0.00048,
+          "codex": 0.00024
+        }
+      }
+    },
+    {
+      "id": "search-timeout-seconds",
+      "prompt": "Find the timeout_seconds usage.",
+      "tool": "search_text",
+      "tool_arguments": {
+        "context_lines": 1,
+        "max_results": 5,
+        "query": "timeout_seconds"
+      },
+      "context_files": [
+        "pkg/config.py",
+        "pkg/http_client.py",
+        "app/main.py",
+        "app/reporting.py"
+      ],
+      "with_mcp": {
+        "input_tokens": 51,
+        "output_tokens": 252,
+        "total_tokens": 303,
+        "tool_request_tokens": 40,
+        "tool_response_tokens": 252,
+        "cost_usd": {
+          "amp": 0.0004545,
+          "claude_code": 0.000909,
+          "codex": 0.0004545
+        }
+      },
+      "without_mcp": {
+        "input_tokens": 317,
+        "output_tokens": 0,
+        "total_tokens": 317,
+        "context_tokens": 306,
+        "cost_usd": {
+          "amp": 0.0004755,
+          "claude_code": 0.000951,
+          "codex": 0.0004755
+        }
+      },
+      "savings": {
+        "tokens_saved": 14,
+        "savings_pct": 0.044164,
+        "cost_saved_usd": {
+          "amp": 0.000021,
+          "claude_code": 0.000042,
+          "codex": 0.000021
+        }
+      }
+    }
+  ],
+  "aggregate": {
+    "case_count": 5,
+    "with_mcp": {
+      "input_tokens": 243,
+      "output_tokens": 641,
+      "total_tokens": 884,
+      "cost_usd": {
+        "amp": 0.001326,
+        "claude_code": 0.002652,
+        "codex": 0.001326
+      }
+    },
+    "without_mcp": {
+      "input_tokens": 1478,
+      "output_tokens": 0,
+      "total_tokens": 1478,
+      "cost_usd": {
+        "amp": 0.002217,
+        "claude_code": 0.004434,
+        "codex": 0.002217
+      }
+    },
+    "savings": {
+      "tokens_saved": 594,
+      "savings_pct": 0.401894,
+      "cost_saved_usd": {
+        "amp": 0.000891,
+        "claude_code": 0.001782,
+        "codex": 0.000891
+      }
+    }
+  }
+}

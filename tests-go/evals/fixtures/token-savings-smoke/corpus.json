@@ -1,0 +1,29 @@
+{
+  "dataset": "token-savings-smoke",
+  "documents": [
+    {
+      "id": "pkg-config",
+      "path": "pkg/config.py",
+      "language": "python",
+      "text": "DEFAULT_TIMEOUT_SECONDS = 5\n\nclass RuntimeConfig:\n    def __init__(self, base_url: str, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS) -> None:\n        self.base_url = base_url\n        self.timeout_seconds = timeout_seconds\n\ndef load_config(base_url: str) -> RuntimeConfig:\n    return RuntimeConfig(base_url=base_url)\n"
+    },
+    {
+      "id": "pkg-http-client",
+      "path": "pkg/http_client.py",
+      "language": "python",
+      "text": "from pkg.config import RuntimeConfig\n\nclass HTTPClient:\n    def __init__(self, config: RuntimeConfig) -> None:\n        self.config = config\n\n    def get_status(self) -> str:\n        timeout_seconds = self.config.timeout_seconds\n        return f\"GET {self.config.base_url}/status timeout={timeout_seconds}\"\n"
+    },
+    {
+      "id": "app-main",
+      "path": "app/main.py",
+      "language": "python",
+      "text": "from pkg.config import load_config\nfrom pkg.http_client import HTTPClient\n\ndef run() -> str:\n    config = load_config(\"https://example.test\")\n    client = HTTPClient(config)\n    return client.get_status()\n"
+    },
+    {
+      "id": "app-reporting",
+      "path": "app/reporting.py",
+      "language": "python",
+      "text": "from pkg.http_client import HTTPClient\n\ndef build_report(client: HTTPClient) -> str:\n    status_line = client.get_status()\n    return f\"report::{status_line}\"\n"
+    }
+  ]
+}

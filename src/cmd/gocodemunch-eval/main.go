@@ -26,6 +26,8 @@ import (
 )
 
 const (
+	defaultEvalMode          = "retrieval-eval"
+	evalModeTokenSavings     = "token-savings-smoke"
 	defaultFixturesDir       = "tests-go/evals/fixtures"
 	defaultNamespacePrefix   = "eval-fixtures"
 	defaultMarkdownReportDir = "docs/evals/runs"
@@ -195,6 +197,7 @@ func runWithArgs(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("gocodemunch-eval", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 
+	modeArg := flags.String("mode", defaultEvalMode, "Eval mode (retrieval-eval|token-savings-smoke)")
 	fixturesDirArg := flags.String("fixtures-dir", defaultFixturesDir, "Path containing corpus.json, queries.json, and relevance.json")
 	providersArg := flags.String("providers", "", "Comma-separated embedding providers (ollama,vllm); defaults to EMBEDDING_PROVIDER")
 	backendsArg := flags.String("backends", "", "Comma-separated vector backends (sqlite,qdrant); defaults to VECTOR_BACKEND")
@@ -230,6 +233,58 @@ func runWithArgs(args []string, stdout, stderr io.Writer) int {
 
 	if err := flags.Parse(args); err != nil {
 		return 2
+	}
+
+	explicitFlags := map[string]struct{}{}
+	flags.Visit(func(f *flag.Flag) {
+		explicitFlags[f.Name] = struct{}{}
+	})
+
+	mode, err := normalizeEvalMode(*modeArg)
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve eval mode: %v\n", err)
+		return 2
+	}
+
+	if mode == evalModeTokenSavings {
+		fixturesDirValue := strings.TrimSpace(*fixturesDirArg)
+		if _, ok := explicitFlags["fixtures-dir"]; !ok && fixturesDirValue == defaultFixturesDir {
+			fixturesDirValue = defaultTokenSavingsFixturesDir
+		}
+
+		outPathValue := strings.TrimSpace(*outPathArg)
+		if _, ok := explicitFlags["out"]; !ok && outPathValue == "" {
+			outPathValue = defaultTokenSavingsOutputPath
+		}
+
+		skipMarkdownReport := *skipMarkdownReportArg
+		if _, ok := explicitFlags["skip-markdown-report"]; !ok {
+			skipMarkdownReport = true
+		}
+
+		report, runErr := runTokenSavingsSmokeMode(
+			context.Background(),
+			cfg,
+			fixturesDirValue,
+			*keepDataArg,
+			skipMarkdownReport,
+		)
+		if runErr != nil {
+			fmt.Fprintf(stderr, "run token savings smoke: %v\n", runErr)
+			return 1
+		}
+
+		payload, marshalErr := json.MarshalIndent(report, "", "  ")
+		if marshalErr != nil {
+			fmt.Fprintf(stderr, "marshal token savings report: %v\n", marshalErr)
+			return 1
+		}
+		if err := writeJSONReport(outPathValue, payload); err != nil {
+			fmt.Fprintf(stderr, "write token savings report: %v\n", err)
+			return 1
+		}
+		_, _ = fmt.Fprintln(stdout, string(payload))
+		return 0
 	}
 
 	fixturesDir, err := resolveFixturesDir(*fixturesDirArg)
@@ -343,6 +398,39 @@ func runWithArgs(args []string, stdout, stderr io.Writer) int {
 		return evalGateFailureExitCode
 	}
 	return 0
+}
+
+func normalizeEvalMode(raw string) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(raw))
+	if mode == "" {
+		return defaultEvalMode, nil
+	}
+
+	switch mode {
+	case defaultEvalMode, evalModeTokenSavings:
+		return mode, nil
+	default:
+		return "", fmt.Errorf(
+			"unsupported mode %q (allowed: %s,%s)",
+			raw,
+			defaultEvalMode,
+			evalModeTokenSavings,
+		)
+	}
+}
+
+func writeJSONReport(outPath string, payload []byte) error {
+	trimmed := strings.TrimSpace(outPath)
+	if trimmed == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(trimmed), 0o755); err != nil {
+		return fmt.Errorf("create output directory: %w", err)
+	}
+	if err := os.WriteFile(trimmed, append(payload, '\n'), 0o644); err != nil {
+		return fmt.Errorf("write report: %w", err)
+	}
+	return nil
 }
 
 func resolveEvalThresholdConfig(
