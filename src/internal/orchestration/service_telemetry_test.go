@@ -2,10 +2,14 @@ package orchestration
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/config"
+	"github.com/jgravelle/gocodemunch-mcp/src/internal/storage"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/telemetry"
 )
 
@@ -58,6 +62,174 @@ func TestCallToolRecordsTelemetryAndOverridesSavingsMeta(t *testing.T) {
 	}
 	if tool := cumulative.ToolBreakdown["telemetry_probe"]; tool.CallCount != 1 || tool.TokensSaved != perCall {
 		t.Fatalf("unexpected telemetry tool breakdown: %#v", cumulative.ToolBreakdown)
+	}
+}
+
+func TestCallToolRecordsValidationFailureAndInternalErrorTelemetry(t *testing.T) {
+	now := time.Date(2026, 5, 1, 12, 30, 0, 0, time.UTC)
+	tracker := telemetry.NewTracker(testTelemetryPricing(), func() time.Time { return now })
+	service := New(testTelemetryConfig(), Dependencies{Telemetry: tracker})
+
+	service.tools["validation_probe"] = Tool{
+		Name:        "validation_probe",
+		Description: "test-only validation probe",
+		InputSchema: objectSchema(map[string]any{
+			"query": stringProp("Query text"),
+		}, "query"),
+		Handler: func(_ context.Context, _ map[string]any) (map[string]any, error) {
+			t.Fatal("validation probe handler should not run when input validation fails")
+			return nil, nil
+		},
+	}
+	service.tools["error_probe"] = Tool{
+		Name:        "error_probe",
+		Description: "test-only failing probe",
+		InputSchema: objectSchema(map[string]any{}),
+		Handler: func(_ context.Context, _ map[string]any) (map[string]any, error) {
+			return nil, errors.New("boom")
+		},
+	}
+
+	validationPayload := service.CallTool(context.Background(), "validation_probe", map[string]any{
+		"query": 42,
+	})
+	if got, _ := validationPayload["error"].(string); got == "" {
+		t.Fatalf("expected validation error payload, got %#v", validationPayload)
+	}
+	validationMeta := mustMetaMap(t, validationPayload)
+	if got := intFieldFromAny(t, validationMeta["tokens_saved"]); got <= 0 {
+		t.Fatalf("expected validation failure telemetry to include positive tokens_saved, got %#v", validationMeta)
+	}
+
+	errorPayload := service.CallTool(context.Background(), "error_probe", map[string]any{})
+	if got, _ := errorPayload["error"].(string); got != "Internal error processing error_probe" {
+		t.Fatalf("unexpected internal error payload: %#v", errorPayload)
+	}
+	errorMeta := mustMetaMap(t, errorPayload)
+	if got := intFieldFromAny(t, errorMeta["total_tokens_saved"]); got <= intFieldFromAny(t, validationMeta["total_tokens_saved"]) {
+		t.Fatalf("expected cumulative telemetry to advance after internal error, validation=%#v internal=%#v", validationMeta, errorMeta)
+	}
+
+	session := tracker.SessionSnapshot()
+	if session.CallCount != 2 {
+		t.Fatalf("expected validation failure and internal error to both be recorded, got %#v", session)
+	}
+	if tool := session.ToolBreakdown["validation_probe"]; tool.CallCount != 1 {
+		t.Fatalf("expected validation_probe call count to be recorded, got %#v", session.ToolBreakdown)
+	}
+	if tool := session.ToolBreakdown["error_probe"]; tool.CallCount != 1 {
+		t.Fatalf("expected error_probe call count to be recorded, got %#v", session.ToolBreakdown)
+	}
+}
+
+func TestCallToolRecordsCanceledTelemetryWithoutRunningHandler(t *testing.T) {
+	now := time.Date(2026, 5, 1, 12, 45, 0, 0, time.UTC)
+	tracker := telemetry.NewTracker(testTelemetryPricing(), func() time.Time { return now })
+	service := New(config.Config{
+		ServerName:       "gocodemunch-mcp",
+		ServerVersion:    "test",
+		RequestTimeoutMS: 50,
+		Disabled:         map[string]struct{}{},
+		SavingsCompetitorPricing: map[string]config.SavingsCompetitorPricing{
+			"claude_code": {InputUSDPerMTok: 3.0, OutputUSDPerMTok: 15.0},
+			"codex":       {InputUSDPerMTok: 1.5, OutputUSDPerMTok: 6.0},
+			"amp":         {InputUSDPerMTok: 1.5, OutputUSDPerMTok: 6.0},
+		},
+	}, Dependencies{Telemetry: tracker})
+
+	handlerCalled := false
+	service.tools["cancel_probe"] = Tool{
+		Name:        "cancel_probe",
+		Description: "test-only cancel probe",
+		InputSchema: objectSchema(map[string]any{}),
+		Handler: func(_ context.Context, _ map[string]any) (map[string]any, error) {
+			handlerCalled = true
+			return map[string]any{"ok": true}, nil
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	payload := service.CallTool(ctx, "cancel_probe", map[string]any{})
+
+	if handlerCalled {
+		t.Fatal("expected canceled call to skip handler execution")
+	}
+	if got, _ := payload["error"].(string); got != "Internal error processing cancel_probe" {
+		t.Fatalf("unexpected canceled payload: %#v", payload)
+	}
+	meta := mustMetaMap(t, payload)
+	if got := intFieldFromAny(t, meta["tokens_saved"]); got <= 0 {
+		t.Fatalf("expected canceled call to record telemetry, got %#v", meta)
+	}
+	if session := tracker.SessionSnapshot(); session.CallCount != 1 {
+		t.Fatalf("expected one recorded canceled call, got %#v", session)
+	}
+}
+
+func TestCallToolCountsSuccessfulBatchItemsInTelemetry(t *testing.T) {
+	now := time.Date(2026, 5, 1, 13, 15, 0, 0, time.UTC)
+	tracker := telemetry.NewTracker(testTelemetryPricing(), func() time.Time { return now })
+	store := mustIndexStore(t)
+	repoID := seedTelemetryBatchRepo(t, store)
+	service := New(testTelemetryConfig(), Dependencies{
+		IndexStore: store,
+		Telemetry:  tracker,
+	})
+
+	payload := service.CallTool(context.Background(), "get_file_outline", map[string]any{
+		"repo":       repoID,
+		"file_paths": []string{"alpha.py", "beta.py"},
+	})
+	results, ok := payload["results"].([]map[string]any)
+	if !ok {
+		rawResults, ok := payload["results"].([]any)
+		if !ok {
+			t.Fatalf("expected batch outline results, got %#v", payload)
+		}
+		results = make([]map[string]any, 0, len(rawResults))
+		for _, item := range rawResults {
+			row, ok := item.(map[string]any)
+			if !ok {
+				t.Fatalf("expected outline row map, got %#v", item)
+			}
+			results = append(results, row)
+		}
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected two outline results, got %#v", payload)
+	}
+
+	session := tracker.SessionSnapshot()
+	if session.CallCount != 2 {
+		t.Fatalf("expected batch outline telemetry to count two logical calls, got %#v", session)
+	}
+	if tool := session.ToolBreakdown["get_file_outline"]; tool.CallCount != 2 {
+		t.Fatalf("expected get_file_outline tool breakdown to count two logical calls, got %#v", session.ToolBreakdown)
+	}
+}
+
+func TestCallToolIgnoresTelemetryCollectorPanics(t *testing.T) {
+	service := New(testTelemetryConfig(), Dependencies{Telemetry: panicTelemetryCollector{}})
+	service.tools["panic_safe_probe"] = Tool{
+		Name:        "panic_safe_probe",
+		Description: "test-only panic-safe probe",
+		InputSchema: objectSchema(map[string]any{}),
+		Handler: func(_ context.Context, _ map[string]any) (map[string]any, error) {
+			return map[string]any{"ok": true}, nil
+		},
+	}
+
+	payload := service.CallTool(context.Background(), "panic_safe_probe", map[string]any{})
+	if ok, _ := payload["ok"].(bool); !ok {
+		t.Fatalf("expected tool response to survive telemetry collector panic, got %#v", payload)
+	}
+	meta := mustMetaMap(t, payload)
+	if got := intFieldFromAny(t, meta["tokens_saved"]); got != 0 {
+		t.Fatalf("expected panicing telemetry collector to fall back to zero meta, got %#v", meta)
+	}
+	if got := intFieldFromAny(t, meta["total_tokens_saved"]); got != 0 {
+		t.Fatalf("expected panicing telemetry collector to preserve tool response with zero cumulative meta, got %#v", meta)
 	}
 }
 
@@ -288,4 +460,55 @@ func floatMapFromAny(t *testing.T, value any) map[string]float64 {
 		t.Fatalf("expected map value, got %#v", value)
 		return nil
 	}
+}
+
+func seedTelemetryBatchRepo(t *testing.T, store *storage.SQLiteIndexStore) string {
+	t.Helper()
+
+	sourceRoot := t.TempDir()
+	files := map[string]string{
+		"alpha.py": "def alpha():\n    return 'alpha'\n",
+		"beta.py":  "def beta():\n    return 'beta'\n",
+	}
+	fileMTimes := make(map[string]int64, len(files))
+	fileHashes := make(map[string]string, len(files))
+	for relPath, content := range files {
+		absolutePath := filepath.Join(sourceRoot, relPath)
+		if err := os.WriteFile(absolutePath, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", relPath, err)
+		}
+		fileMTimes[relPath] = time.Now().Unix()
+		fileHashes[relPath] = relPath + "-hash"
+	}
+
+	repoID := "local/telemetry-batch"
+	index := storage.RepoIndex{
+		Repo:         repoID,
+		IndexedAt:    time.Now().UTC().Format(time.RFC3339),
+		SourceRoot:   sourceRoot,
+		DisplayName:  "telemetry-batch",
+		Languages:    map[string]int{"python": len(files)},
+		IndexVersion: repoIndexVersion,
+		Files:        fileHashes,
+		FileMTimes:   fileMTimes,
+		Symbols:      map[string]any{},
+	}
+	if err := store.Save(context.Background(), repoID, index); err != nil {
+		t.Fatalf("seed telemetry batch repo: %v", err)
+	}
+	return repoID
+}
+
+type panicTelemetryCollector struct{}
+
+func (panicTelemetryCollector) RecordCall(telemetry.CallRecord) telemetry.CallSnapshot {
+	panic("record call panic")
+}
+
+func (panicTelemetryCollector) SessionSnapshot() telemetry.SessionSnapshot {
+	panic("session snapshot panic")
+}
+
+func (panicTelemetryCollector) CumulativeSnapshot() telemetry.CumulativeSnapshot {
+	panic("cumulative snapshot panic")
 }

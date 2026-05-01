@@ -31,7 +31,7 @@ func (s *Service) recordTelemetry(
 		payload = map[string]any{}
 	}
 
-	call := collector.RecordCall(telemetry.CallRecord{
+	record := telemetry.CallRecord{
 		ToolName:          name,
 		StartedAt:         startedAt.UTC(),
 		FinishedAt:        time.Now().UTC(),
@@ -39,9 +39,45 @@ func (s *Service) recordTelemetry(
 		ResponseTokens:    estimateSerializedTokens(payload),
 		InputTokensSaved:  estimateSerializedTokens(map[string]any{"name": name, "arguments": arguments}),
 		OutputTokensSaved: estimateSerializedTokens(payload),
-	})
+		LogicalCalls:      s.telemetryLogicalCalls(name, arguments, payload),
+	}
 
-	return call, s.normalizeSessionSnapshot(collector.SessionSnapshot()), s.normalizeCumulativeSnapshot(collector.CumulativeSnapshot())
+	call, ok := recoverTelemetryValue(func() telemetry.CallSnapshot {
+		return collector.RecordCall(record)
+	})
+	if !ok {
+		return telemetry.CallSnapshot{}, s.zeroSessionSnapshot(), s.zeroCumulativeSnapshot()
+	}
+
+	session := s.zeroSessionSnapshot()
+	if snapshot, ok := recoverTelemetryValue(func() telemetry.SessionSnapshot {
+		return collector.SessionSnapshot()
+	}); ok {
+		session = s.normalizeSessionSnapshot(snapshot)
+	}
+
+	cumulative := s.zeroCumulativeSnapshot()
+	if snapshot, ok := recoverTelemetryValue(func() telemetry.CumulativeSnapshot {
+		return collector.CumulativeSnapshot()
+	}); ok {
+		cumulative = s.normalizeCumulativeSnapshot(snapshot)
+	}
+
+	return call, session, cumulative
+}
+
+func (s *Service) finalizeToolPayload(
+	name string,
+	arguments map[string]any,
+	payload map[string]any,
+	startedAt time.Time,
+) map[string]any {
+	callSnapshot, sessionSnapshot, cumulativeSnapshot := s.recordTelemetry(name, arguments, payload, startedAt)
+	payload = s.applySavingsMeta(payload, callSnapshot, cumulativeSnapshot)
+	if name == "get_session_stats" {
+		payload = s.applySessionStatsPayload(payload, sessionSnapshot, cumulativeSnapshot)
+	}
+	return s.applyMetaPolicy(payload)
 }
 
 func (s *Service) applySavingsMeta(
@@ -168,4 +204,59 @@ func estimateSerializedTokens(value any) int {
 		return 0
 	}
 	return int(math.Ceil(float64(len(encoded)) / estimatedSerializedBytesPerToken))
+}
+
+func (s *Service) telemetryLogicalCalls(name string, arguments map[string]any, payload map[string]any) int {
+	if !toolSucceeded(payload) {
+		return 1
+	}
+
+	switch name {
+	case "get_file_outline", "find_importers":
+		if paths, ok := optionalStringSliceArg(arguments, "file_paths"); ok && len(paths) > 1 {
+			return len(paths)
+		}
+	case "find_references", "check_references":
+		if identifiers, ok := optionalRawStringSliceArg(arguments, "identifiers"); ok && len(identifiers) > 1 {
+			return len(identifiers)
+		}
+	case "get_symbol_source":
+		if symbolIDs, ok := optionalRawStringSliceArg(arguments, "symbol_ids"); ok && len(symbolIDs) > 1 {
+			return len(symbolIDs)
+		}
+	case "get_context_bundle":
+		if symbolIDs, ok := optionalRawStringSliceArg(arguments, "symbol_ids"); ok {
+			deduped := dedupePreservingOrder(symbolIDs)
+			if len(deduped) > 1 {
+				return len(deduped)
+			}
+		}
+	case "index_folder":
+		switch typed := arguments["changed_paths"].(type) {
+		case []any:
+			if len(typed) > 1 {
+				return len(typed)
+			}
+		case []map[string]any:
+			if len(typed) > 1 {
+				return len(typed)
+			}
+		}
+	}
+
+	return 1
+}
+
+func recoverTelemetryValue[T any](fn func() T) (value T, ok bool) {
+	ok = true
+	defer func() {
+		if recover() != nil {
+			var zero T
+			value = zero
+			ok = false
+		}
+	}()
+
+	value = fn()
+	return value, true
 }

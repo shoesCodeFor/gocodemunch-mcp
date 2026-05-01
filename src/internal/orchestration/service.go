@@ -99,51 +99,61 @@ func (s *Service) ListTools() []Tool {
 }
 
 // CallTool executes one tool call and returns a JSON-serializable payload.
-func (s *Service) CallTool(ctx context.Context, name string, arguments map[string]any) map[string]any {
+func (s *Service) CallTool(ctx context.Context, name string, arguments map[string]any) (payload map[string]any) {
+	startedAt := time.Now().UTC()
+	recordedArguments := arguments
+	defer func() {
+		if recover() != nil {
+			payload = internalToolErrorPayload(name)
+		}
+		payload = s.finalizeToolPayload(name, recordedArguments, payload, startedAt)
+	}()
+
 	tool, ok := s.tools[name]
 	if !ok {
-		return map[string]any{"error": fmt.Sprintf("Unknown tool: %s", name)}
+		payload = map[string]any{"error": fmt.Sprintf("Unknown tool: %s", name)}
+		return
 	}
 
 	coerced := CoerceArguments(arguments, tool.InputSchema)
+	recordedArguments = coerced
 	if err := ValidateArguments(coerced, tool.InputSchema); err != nil {
-		return map[string]any{"error": fmt.Sprintf("Input validation error: %s", err.Error())}
+		payload = map[string]any{"error": fmt.Sprintf("Input validation error: %s", err.Error())}
+		return
 	}
 
-	startedAt := time.Now().UTC()
 	callCtx, cancel := s.newRequestContext(ctx)
 	defer cancel()
 
 	if err := callCtx.Err(); err != nil {
-		return internalToolErrorPayload(name)
+		payload = internalToolErrorPayload(name)
+		return
 	}
 
 	s.awaitFreshnessIfStrict(callCtx, name, coerced)
 	if err := callCtx.Err(); err != nil {
-		return internalToolErrorPayload(name)
+		payload = internalToolErrorPayload(name)
+		return
 	}
 
 	repoScopedCfg := s.repoScopedConfig(callCtx, coerced)
 	repoArg := strings.TrimSpace(stringArg(coerced, "repo", ""))
 	if repoArg != "" {
 		if _, disabled := repoScopedCfg.Disabled[name]; disabled {
-			return projectToolDisabledPayload(name)
+			payload = projectToolDisabledPayload(name)
+			return
 		}
 	}
 
-	payload, err := tool.Handler(callCtx, coerced)
+	var err error
+	payload, err = tool.Handler(callCtx, coerced)
 	if err != nil {
-		return internalToolErrorPayload(name)
+		payload = internalToolErrorPayload(name)
+		return
 	}
 
 	s.attachFreshnessMeta(callCtx, name, coerced, payload)
-	callSnapshot, sessionSnapshot, cumulativeSnapshot := s.recordTelemetry(name, coerced, payload, startedAt)
-	payload = s.applySavingsMeta(payload, callSnapshot, cumulativeSnapshot)
-	if name == "get_session_stats" {
-		payload = s.applySessionStatsPayload(payload, sessionSnapshot, cumulativeSnapshot)
-	}
-
-	return s.applyMetaPolicy(payload)
+	return
 }
 
 func internalToolErrorPayload(name string) map[string]any {

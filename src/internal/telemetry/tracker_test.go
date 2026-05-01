@@ -113,6 +113,47 @@ func TestTrackerRestoreCumulativeAddsNewSessionWork(t *testing.T) {
 	}
 }
 
+func TestTrackerRecordCallSupportsLogicalCallWeights(t *testing.T) {
+	now := time.Date(2026, 5, 1, 14, 0, 0, 0, time.UTC)
+	tracker := NewTracker(
+		map[string]Pricing{
+			"codex": {InputUSDPerMTok: 1.5, OutputUSDPerMTok: 6},
+		},
+		func() time.Time { return now },
+	)
+
+	call := tracker.RecordCall(CallRecord{
+		ToolName:          "get_file_outline",
+		StartedAt:         now.Add(-40 * time.Millisecond),
+		FinishedAt:        now,
+		RequestTokens:     20,
+		ResponseTokens:    30,
+		InputTokensSaved:  8,
+		OutputTokensSaved: 4,
+		LogicalCalls:      3,
+	})
+
+	if call.LogicalCalls != 3 {
+		t.Fatalf("expected logical calls to round-trip in call snapshot, got %#v", call)
+	}
+
+	session := tracker.SessionSnapshot()
+	if session.CallCount != 3 {
+		t.Fatalf("expected weighted logical calls in session snapshot, got %#v", session)
+	}
+	if tool := session.ToolBreakdown["get_file_outline"]; tool.CallCount != 3 {
+		t.Fatalf("expected weighted logical calls in tool breakdown, got %#v", session.ToolBreakdown)
+	}
+
+	cumulative := tracker.CumulativeSnapshot()
+	if cumulative.CallCount != 3 || cumulative.SessionCount != 1 {
+		t.Fatalf("expected weighted logical calls in cumulative snapshot, got %#v", cumulative)
+	}
+	if cumulative.TokensSaved != 12 {
+		t.Fatalf("expected token totals to remain based on serialized payload size, got %#v", cumulative)
+	}
+}
+
 func TestTrackerRecordCallNormalizesNegativeAndBlankValues(t *testing.T) {
 	now := time.Date(2026, 5, 1, 15, 0, 0, 0, time.UTC)
 	tracker := NewTracker(

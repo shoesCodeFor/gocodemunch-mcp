@@ -22,6 +22,7 @@ type CallRecord struct {
 	ResponseTokens    int
 	InputTokensSaved  int
 	OutputTokensSaved int
+	LogicalCalls      int
 }
 
 // CallSnapshot captures normalized per-call telemetry.
@@ -36,6 +37,7 @@ type CallSnapshot struct {
 	InputTokensSaved  int                `json:"input_tokens_saved"`
 	OutputTokensSaved int                `json:"output_tokens_saved"`
 	TokensSaved       int                `json:"tokens_saved"`
+	LogicalCalls      int                `json:"logical_calls,omitempty"`
 	CostAvoidedUSD    map[string]float64 `json:"cost_avoided_usd"`
 }
 
@@ -158,7 +160,7 @@ func (t *Tracker) RecordCall(record CallRecord) CallSnapshot {
 	}
 
 	t.session.LastUpdatedAt = normalized.FinishedAt
-	t.session.CallCount++
+	t.session.CallCount += normalized.LogicalCalls
 	t.session.RequestTokens += normalized.RequestTokens
 	t.session.ResponseTokens += normalized.ResponseTokens
 	t.session.TotalTokens += normalized.TotalTokens
@@ -174,7 +176,7 @@ func (t *Tracker) RecordCall(record CallRecord) CallSnapshot {
 	if t.cumulative.LastRecordedAt.IsZero() || normalized.FinishedAt.After(t.cumulative.LastRecordedAt) {
 		t.cumulative.LastRecordedAt = normalized.FinishedAt
 	}
-	t.cumulative.CallCount++
+	t.cumulative.CallCount += normalized.LogicalCalls
 	t.cumulative.RequestTokens += normalized.RequestTokens
 	t.cumulative.ResponseTokens += normalized.ResponseTokens
 	t.cumulative.TotalTokens += normalized.TotalTokens
@@ -197,6 +199,7 @@ func (t *Tracker) RecordCall(record CallRecord) CallSnapshot {
 		InputTokensSaved:  normalized.InputTokensSaved,
 		OutputTokensSaved: normalized.OutputTokensSaved,
 		TokensSaved:       normalized.TokensSaved,
+		LogicalCalls:      normalized.LogicalCalls,
 		CostAvoidedUSD:    cloneCostAvoided(costAvoided),
 	}
 }
@@ -245,6 +248,7 @@ func (t *Tracker) normalizeCallRecord(record CallRecord) CallSnapshot {
 	responseTokens := sanitizeNonNegative(record.ResponseTokens)
 	inputTokensSaved := sanitizeNonNegative(record.InputTokensSaved)
 	outputTokensSaved := sanitizeNonNegative(record.OutputTokensSaved)
+	logicalCalls := sanitizeLogicalCalls(record.LogicalCalls)
 
 	return CallSnapshot{
 		ToolName:          normalizeToolName(record.ToolName),
@@ -256,6 +260,7 @@ func (t *Tracker) normalizeCallRecord(record CallRecord) CallSnapshot {
 		InputTokensSaved:  inputTokensSaved,
 		OutputTokensSaved: outputTokensSaved,
 		TokensSaved:       inputTokensSaved + outputTokensSaved,
+		LogicalCalls:      logicalCalls,
 	}
 }
 
@@ -290,6 +295,13 @@ func normalizeToolName(name string) string {
 func sanitizeNonNegative(value int) int {
 	if value < 0 {
 		return 0
+	}
+	return value
+}
+
+func sanitizeLogicalCalls(value int) int {
+	if value <= 0 {
+		return 1
 	}
 	return value
 }
@@ -340,7 +352,7 @@ func mergeToolSnapshot(
 	if tool.CostAvoidedUSD == nil {
 		tool.CostAvoidedUSD = map[string]float64{}
 	}
-	tool.CallCount++
+	tool.CallCount += sanitizeLogicalCalls(call.LogicalCalls)
 	tool.RequestTokens += call.RequestTokens
 	tool.ResponseTokens += call.ResponseTokens
 	tool.TotalTokens += call.TotalTokens
