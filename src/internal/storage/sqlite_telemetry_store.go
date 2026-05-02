@@ -117,6 +117,30 @@ func (s *SQLiteTelemetryStore) LoadLatestSnapshot(
 	return snapshot, nil
 }
 
+// LoadSnapshots returns cumulative telemetry snapshots captured at or after since.
+func (s *SQLiteTelemetryStore) LoadSnapshots(
+	ctx context.Context,
+	since time.Time,
+) ([]telemetry.PersistedCumulativeSnapshot, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if _, err := os.Stat(s.dbPath); err != nil {
+		if os.IsNotExist(err) {
+			return []telemetry.PersistedCumulativeSnapshot{}, nil
+		}
+		return nil, fmt.Errorf("stat telemetry db: %w", err)
+	}
+
+	db, err := s.openDB()
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	return loadSQLiteTelemetrySnapshots(ctx, db, since.UTC())
+}
+
 // SaveSnapshot appends a cumulative telemetry snapshot row.
 func (s *SQLiteTelemetryStore) SaveSnapshot(
 	ctx context.Context,
@@ -388,6 +412,45 @@ func loadLatestSQLiteTelemetrySnapshot(
 		return telemetry.PersistedCumulativeSnapshot{}, fmt.Errorf("decode telemetry snapshot: %w", err)
 	}
 	return snapshot, nil
+}
+
+func loadSQLiteTelemetrySnapshots(
+	ctx context.Context,
+	db *sql.DB,
+	since time.Time,
+) ([]telemetry.PersistedCumulativeSnapshot, error) {
+	query := `SELECT payload FROM cumulative_snapshots`
+	args := []any{}
+	if !since.IsZero() {
+		query += ` WHERE captured_at >= ?`
+		args = append(args, since.Format(time.RFC3339Nano))
+	}
+	query += ` ORDER BY captured_at ASC, snapshot_id ASC`
+
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("load telemetry snapshots: %w", err)
+	}
+	defer rows.Close()
+
+	snapshots := make([]telemetry.PersistedCumulativeSnapshot, 0, 16)
+	for rows.Next() {
+		var payload string
+		if err := rows.Scan(&payload); err != nil {
+			return nil, fmt.Errorf("scan telemetry snapshot: %w", err)
+		}
+
+		var snapshot telemetry.PersistedCumulativeSnapshot
+		if err := json.Unmarshal([]byte(payload), &snapshot); err != nil {
+			return nil, fmt.Errorf("decode telemetry snapshot: %w", err)
+		}
+		snapshots = append(snapshots, snapshot)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate telemetry snapshots: %w", err)
+	}
+	return snapshots, nil
 }
 
 func saveSQLiteTelemetrySnapshot(

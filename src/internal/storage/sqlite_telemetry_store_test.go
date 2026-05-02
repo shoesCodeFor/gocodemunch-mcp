@@ -98,6 +98,63 @@ func TestSQLiteTelemetryStoreSaveAndLoadLatestSnapshot(t *testing.T) {
 	}
 }
 
+func TestSQLiteTelemetryStoreLoadSnapshotsSince(t *testing.T) {
+	store, err := NewSQLiteTelemetryStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create telemetry store: %v", err)
+	}
+
+	first := telemetry.PersistedCumulativeSnapshot{
+		CapturedAt: time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC),
+		Cumulative: telemetry.CumulativeSnapshot{
+			SessionCount:   1,
+			CallCount:      1,
+			TotalTokens:    100,
+			TokensSaved:    20,
+			CostAvoidedUSD: map[string]float64{"codex": 0.00003},
+		},
+	}
+	second := telemetry.PersistedCumulativeSnapshot{
+		CapturedAt: time.Date(2026, 5, 1, 12, 5, 0, 0, time.UTC),
+		Cumulative: telemetry.CumulativeSnapshot{
+			SessionCount:   2,
+			CallCount:      3,
+			TotalTokens:    260,
+			TokensSaved:    55,
+			CostAvoidedUSD: map[string]float64{"codex": 0.0000825},
+		},
+	}
+
+	if err := store.SaveSnapshot(context.Background(), first); err != nil {
+		t.Fatalf("save first telemetry snapshot: %v", err)
+	}
+	if err := store.SaveSnapshot(context.Background(), second); err != nil {
+		t.Fatalf("save second telemetry snapshot: %v", err)
+	}
+
+	snapshots, err := store.LoadSnapshots(context.Background(), time.Date(2026, 5, 1, 12, 1, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("load telemetry snapshots: %v", err)
+	}
+	if len(snapshots) != 1 {
+		t.Fatalf("expected one telemetry snapshot since cutoff, got %#v", snapshots)
+	}
+	if snapshots[0].CapturedAt != second.CapturedAt {
+		t.Fatalf("expected second snapshot after cutoff, got %#v", snapshots[0])
+	}
+
+	allSnapshots, err := store.LoadSnapshots(context.Background(), time.Time{})
+	if err != nil {
+		t.Fatalf("load all telemetry snapshots: %v", err)
+	}
+	if len(allSnapshots) != 2 {
+		t.Fatalf("expected two telemetry snapshots, got %#v", allSnapshots)
+	}
+	if allSnapshots[0].CapturedAt != first.CapturedAt || allSnapshots[1].CapturedAt != second.CapturedAt {
+		t.Fatalf("expected telemetry snapshots in ascending capture order, got %#v", allSnapshots)
+	}
+}
+
 func TestSQLiteTelemetryStoreReturnsNotFoundWhenEmpty(t *testing.T) {
 	store, err := NewSQLiteTelemetryStore(t.TempDir())
 	if err != nil {

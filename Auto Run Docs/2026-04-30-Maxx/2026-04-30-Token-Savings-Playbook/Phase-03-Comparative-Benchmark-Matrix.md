@@ -16,10 +16,12 @@ This phase builds the full benchmark workflow requested in discovery: a fixed pr
   - Ensure competitor comparisons are emitted for `claude_code`, `codex`, and `amp` in every run.
   - Completed on 2026-05-01: token-savings evals now resolve the same provider/backend matrix used by retrieval evals, run explicit `with_mcp` and `without_mcp` adapters per case, emit per-combination benchmark sections in JSON/Markdown reports, and cover the matrix path with new `gocodemunch-eval` tests while preserving the existing single-combo smoke summary.
 
-- [ ] Add scoring and trend aggregation for token/cost deltas:
+- [x] Add scoring and trend aggregation for token/cost deltas:
   - Compute per-prompt and aggregate deltas (`tokens_saved`, `cost_saved`, `savings_pct`) per competitor.
   - Calculate distribution metrics (mean/median/p95) for savings across the suite.
   - Merge current run metrics with historical SQLite snapshots to produce trend points for each competitor.
+  - Completed on 2026-05-01: token-savings JSON reports now emit per-case and aggregate competitor scorecards (`tokens_saved`, `cost_saved_usd`, `savings_pct`), suite distribution metrics for token/cost savings, and per-competitor trend series that append the current run onto historical SQLite telemetry snapshots when available.
+  - Verified with `go test ./src/cmd/gocodemunch-eval -count=1`, `go test ./src/internal/storage -count=1`, `go test ./src/internal/telemetry ./src/server -count=1`, `go vet ./src/cmd/gocodemunch-eval ./src/internal/storage ./src/internal/telemetry ./src/server`, and `go test ./src/... ./tests-go -count=1`.
 
 - [ ] Persist benchmark history for longitudinal analysis:
   - Store run-level metadata (timestamp, suite version, mode, competitor, aggregate metrics) in SQLite tables dedicated to savings benchmarks.

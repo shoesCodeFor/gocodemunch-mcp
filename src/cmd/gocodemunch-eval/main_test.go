@@ -344,6 +344,9 @@ func TestRunWithArgsTokenSavingsSmokeEmitsSavingsReport(t *testing.T) {
 	if report.Aggregate.WithMCP.TotalTokens >= report.Aggregate.WithoutMCP.TotalTokens {
 		t.Fatalf("expected with_mcp total tokens to stay below without_mcp, got %#v", report.Aggregate)
 	}
+	if report.Aggregate.Distribution.TokensSaved.Mean <= 0 {
+		t.Fatalf("expected aggregate token savings distribution mean to be positive, got %#v", report.Aggregate.Distribution)
+	}
 
 	for _, competitor := range []string{"claude_code", "codex", "amp"} {
 		if _, ok := report.Aggregate.WithMCP.CostUSD[competitor]; !ok {
@@ -354,6 +357,15 @@ func TestRunWithArgsTokenSavingsSmokeEmitsSavingsReport(t *testing.T) {
 		}
 		if _, ok := report.Aggregate.Savings.CostSavedUSD[competitor]; !ok {
 			t.Fatalf("expected %s in aggregate savings cost map: %#v", competitor, report.Aggregate.Savings)
+		}
+		if _, ok := report.Aggregate.Savings.Scores[competitor]; !ok {
+			t.Fatalf("expected %s in aggregate savings score map: %#v", competitor, report.Aggregate.Savings)
+		}
+		if _, ok := report.Aggregate.Distribution.CostSavedUSD[competitor]; !ok {
+			t.Fatalf("expected %s in aggregate cost distribution map: %#v", competitor, report.Aggregate.Distribution)
+		}
+		if len(report.Aggregate.Trends[competitor]) != 1 {
+			t.Fatalf("expected one current-run trend point for %s, got %#v", competitor, report.Aggregate.Trends)
 		}
 	}
 
@@ -377,6 +389,9 @@ func TestRunWithArgsTokenSavingsSmokeEmitsSavingsReport(t *testing.T) {
 		}
 		if row.Savings.TokensSaved <= 0 {
 			t.Fatalf("expected positive per-case tokens_saved for %q, got %#v", row.ID, row)
+		}
+		if len(row.Savings.Scores) != 3 {
+			t.Fatalf("expected per-case competitor scorecards for %q, got %#v", row.ID, row.Savings)
 		}
 	}
 
@@ -460,6 +475,9 @@ func TestRunWithArgsTokenSavingsSmokeResolvesProviderBackendMatrix(t *testing.T)
 		if combo.Aggregate.WithMCP.TotalTokens <= 0 || combo.Aggregate.WithoutMCP.TotalTokens <= 0 {
 			t.Fatalf("expected both modes to record token totals for combo %d: %#v", index, combo.Aggregate)
 		}
+		if combo.Aggregate.CaseCount > 0 && combo.Aggregate.Distribution.TokensSaved.Mean == 0 {
+			t.Fatalf("expected combo distribution metrics for combo %d, got %#v", index, combo.Aggregate.Distribution)
+		}
 		for _, competitor := range []string{"claude_code", "codex", "amp"} {
 			if _, ok := combo.Aggregate.WithMCP.CostUSD[competitor]; !ok {
 				t.Fatalf("expected %s in with_mcp cost map for combo %d: %#v", competitor, index, combo.Aggregate.WithMCP)
@@ -469,6 +487,12 @@ func TestRunWithArgsTokenSavingsSmokeResolvesProviderBackendMatrix(t *testing.T)
 			}
 			if _, ok := combo.Aggregate.Savings.CostSavedUSD[competitor]; !ok {
 				t.Fatalf("expected %s in savings cost map for combo %d: %#v", competitor, index, combo.Aggregate.Savings)
+			}
+			if _, ok := combo.Aggregate.Savings.Scores[competitor]; !ok {
+				t.Fatalf("expected %s in savings score map for combo %d: %#v", competitor, index, combo.Aggregate.Savings)
+			}
+			if len(combo.Aggregate.Trends[competitor]) != 1 {
+				t.Fatalf("expected one trend point for %s in combo %d, got %#v", competitor, index, combo.Aggregate.Trends)
 			}
 		}
 	}

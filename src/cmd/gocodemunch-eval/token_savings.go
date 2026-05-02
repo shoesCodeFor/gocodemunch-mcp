@@ -119,16 +119,44 @@ type tokenSavingsModeAggregateMetrics struct {
 }
 
 type tokenSavingsDeltaReport struct {
-	TokensSaved  int                `json:"tokens_saved"`
-	SavingsPct   float64            `json:"savings_pct"`
-	CostSavedUSD map[string]float64 `json:"cost_saved_usd"`
+	TokensSaved  int                                    `json:"tokens_saved"`
+	SavingsPct   float64                                `json:"savings_pct"`
+	CostSavedUSD map[string]float64                     `json:"cost_saved_usd"`
+	Scores       map[string]tokenSavingsCompetitorScore `json:"scores"`
+}
+
+type tokenSavingsCompetitorScore struct {
+	TokensSaved  int     `json:"tokens_saved"`
+	CostSavedUSD float64 `json:"cost_saved_usd"`
+	SavingsPct   float64 `json:"savings_pct"`
+}
+
+type tokenSavingsDistributionMetric struct {
+	Mean   float64 `json:"mean"`
+	Median float64 `json:"median"`
+	P95    float64 `json:"p95"`
+}
+
+type tokenSavingsDistributionReport struct {
+	TokensSaved  tokenSavingsDistributionMetric            `json:"tokens_saved"`
+	SavingsPct   tokenSavingsDistributionMetric            `json:"savings_pct"`
+	CostSavedUSD map[string]tokenSavingsDistributionMetric `json:"cost_saved_usd"`
+}
+
+type tokenSavingsTrendPoint struct {
+	CapturedAtUTC string  `json:"captured_at_utc"`
+	TokensSaved   int     `json:"tokens_saved"`
+	CostSavedUSD  float64 `json:"cost_saved_usd"`
+	SavingsPct    float64 `json:"savings_pct"`
 }
 
 type tokenSavingsAggregateReport struct {
-	CaseCount  int                              `json:"case_count"`
-	WithMCP    tokenSavingsModeAggregateMetrics `json:"with_mcp"`
-	WithoutMCP tokenSavingsModeAggregateMetrics `json:"without_mcp"`
-	Savings    tokenSavingsDeltaReport          `json:"savings"`
+	CaseCount    int                                 `json:"case_count"`
+	WithMCP      tokenSavingsModeAggregateMetrics    `json:"with_mcp"`
+	WithoutMCP   tokenSavingsModeAggregateMetrics    `json:"without_mcp"`
+	Savings      tokenSavingsDeltaReport             `json:"savings"`
+	Distribution tokenSavingsDistributionReport      `json:"distribution"`
+	Trends       map[string][]tokenSavingsTrendPoint `json:"trends"`
 }
 
 type tokenSavingsContextFile struct {
@@ -173,6 +201,8 @@ func runTokenSavingsSmokeMode(
 	keepData bool,
 	useCombinationDependencies bool,
 ) (tokenSavingsSmokeReport, error) {
+	generatedAt := nowUTCFn().UTC()
+
 	fixturesDir, err := resolveFixturesDir(fixturesDirRaw)
 	if err != nil {
 		return tokenSavingsSmokeReport{}, err
@@ -190,6 +220,10 @@ func runTokenSavingsSmokeMode(
 	defer cleanupCorpus()
 
 	pricing, _ := savings.NormalizePricing(cfg.SavingsCompetitorPricing)
+	historicalSnapshots, err := loadTokenSavingsHistoricalSnapshots(ctx, cfg.StoragePath)
+	if err != nil {
+		historicalSnapshots = nil
+	}
 
 	documentsByPath := make(map[string]fixtureDocument, len(fixtures.Documents))
 	for _, doc := range fixtures.Documents {
@@ -210,6 +244,8 @@ func runTokenSavingsSmokeMode(
 			pricing,
 			materializedRoot,
 			documentsByPath,
+			historicalSnapshots,
+			generatedAt,
 			keepData,
 			useCombinationDependencies,
 		)
@@ -225,7 +261,7 @@ func runTokenSavingsSmokeMode(
 	}
 
 	report := tokenSavingsSmokeReport{
-		GeneratedAtUTC:    nowUTCFn().Format(time.RFC3339),
+		GeneratedAtUTC:    generatedAt.Format(time.RFC3339),
 		Mode:              evalModeTokenSavings,
 		Dataset:           fixtures.Dataset,
 		SuiteVersion:      fixtures.SuiteVersion,
@@ -251,6 +287,8 @@ func runTokenSavingsCombination(
 	pricing map[string]config.SavingsCompetitorPricing,
 	materializedRoot string,
 	documentsByPath map[string]fixtureDocument,
+	historicalSnapshots []telemetry.PersistedCumulativeSnapshot,
+	generatedAt time.Time,
 	keepData bool,
 	useDependencies bool,
 ) (tokenSavingsCombinationReport, error) {
@@ -361,11 +399,13 @@ func runTokenSavingsCombination(
 		totalWithOutput += withMode.OutputTokens
 		totalWithoutInput += withoutMode.InputTokens
 
-		savingsReport := tokenSavingsDeltaReport{
-			TokensSaved:  withoutMode.TotalTokens - withMode.TotalTokens,
-			SavingsPct:   savingsRatio(withoutMode.TotalTokens, withoutMode.TotalTokens-withMode.TotalTokens),
-			CostSavedUSD: savings.DiffCostMap(withoutMode.CostUSD, withMode.CostUSD, pricing),
-		}
+		savingsReport := buildTokenSavingsDeltaReport(
+			withMode.TotalTokens,
+			withMode.CostUSD,
+			withoutMode.TotalTokens,
+			withoutMode.CostUSD,
+			pricing,
+		)
 
 		caseReports = append(caseReports, tokenSavingsCaseReport{
 			ID:            benchmarkCase.ID,
@@ -392,6 +432,13 @@ func runTokenSavingsCombination(
 		TotalTokens:  totalWithoutInput,
 		CostUSD:      savings.CostsForTokens(pricing, totalWithoutInput, 0),
 	}
+	aggregateSavings := buildTokenSavingsDeltaReport(
+		aggregateWith.TotalTokens,
+		aggregateWith.CostUSD,
+		aggregateWithout.TotalTokens,
+		aggregateWithout.CostUSD,
+		pricing,
+	)
 
 	return tokenSavingsCombinationReport{
 		Provider:    combo.Provider,
@@ -401,14 +448,12 @@ func runTokenSavingsCombination(
 		FileCount:   len(fixtures.Documents),
 		Cases:       caseReports,
 		Aggregate: tokenSavingsAggregateReport{
-			CaseCount:  len(caseReports),
-			WithMCP:    aggregateWith,
-			WithoutMCP: aggregateWithout,
-			Savings: tokenSavingsDeltaReport{
-				TokensSaved:  aggregateWithout.TotalTokens - aggregateWith.TotalTokens,
-				SavingsPct:   savingsRatio(aggregateWithout.TotalTokens, aggregateWithout.TotalTokens-aggregateWith.TotalTokens),
-				CostSavedUSD: savings.DiffCostMap(aggregateWithout.CostUSD, aggregateWith.CostUSD, pricing),
-			},
+			CaseCount:    len(caseReports),
+			WithMCP:      aggregateWith,
+			WithoutMCP:   aggregateWithout,
+			Savings:      aggregateSavings,
+			Distribution: buildTokenSavingsDistributionReport(caseReports, pricing),
+			Trends:       buildTokenSavingsTrendSeries(historicalSnapshots, generatedAt, aggregateWith.TotalTokens, aggregateSavings, pricing),
 		},
 	}, nil
 }
@@ -727,6 +772,234 @@ func savingsRatio(baseline int, delta int) float64 {
 	return math.Round((float64(delta)/float64(baseline))*1_000_000) / 1_000_000
 }
 
+func buildTokenSavingsDeltaReport(
+	withTotalTokens int,
+	withCost map[string]float64,
+	withoutTotalTokens int,
+	withoutCost map[string]float64,
+	pricing map[string]config.SavingsCompetitorPricing,
+) tokenSavingsDeltaReport {
+	tokensSaved := withoutTotalTokens - withTotalTokens
+	savingsPct := savingsRatio(withoutTotalTokens, tokensSaved)
+	costSaved := savings.DiffCostMap(withoutCost, withCost, pricing)
+	return tokenSavingsDeltaReport{
+		TokensSaved:  tokensSaved,
+		SavingsPct:   savingsPct,
+		CostSavedUSD: costSaved,
+		Scores:       buildTokenSavingsCompetitorScores(tokensSaved, savingsPct, costSaved, pricing),
+	}
+}
+
+func buildTokenSavingsCompetitorScores(
+	tokensSaved int,
+	savingsPct float64,
+	costSaved map[string]float64,
+	pricing map[string]config.SavingsCompetitorPricing,
+) map[string]tokenSavingsCompetitorScore {
+	competitors := savings.OrderedCompetitors(pricing)
+	if len(competitors) == 0 {
+		return map[string]tokenSavingsCompetitorScore{}
+	}
+
+	scores := make(map[string]tokenSavingsCompetitorScore, len(competitors))
+	for _, competitor := range competitors {
+		scores[competitor] = tokenSavingsCompetitorScore{
+			TokensSaved:  tokensSaved,
+			CostSavedUSD: roundTokenSavingsFloat(costSaved[competitor]),
+			SavingsPct:   savingsPct,
+		}
+	}
+	return scores
+}
+
+func buildTokenSavingsDistributionReport(
+	caseReports []tokenSavingsCaseReport,
+	pricing map[string]config.SavingsCompetitorPricing,
+) tokenSavingsDistributionReport {
+	tokenSamples := make([]float64, 0, len(caseReports))
+	savingsPctSamples := make([]float64, 0, len(caseReports))
+	competitorCostSamples := make(map[string][]float64, len(pricing))
+	for _, competitor := range savings.OrderedCompetitors(pricing) {
+		competitorCostSamples[competitor] = make([]float64, 0, len(caseReports))
+	}
+
+	for _, row := range caseReports {
+		tokenSamples = append(tokenSamples, float64(row.Savings.TokensSaved))
+		savingsPctSamples = append(savingsPctSamples, row.Savings.SavingsPct)
+		for competitor := range competitorCostSamples {
+			competitorCostSamples[competitor] = append(
+				competitorCostSamples[competitor],
+				row.Savings.CostSavedUSD[competitor],
+			)
+		}
+	}
+
+	costDistribution := make(map[string]tokenSavingsDistributionMetric, len(competitorCostSamples))
+	for competitor, samples := range competitorCostSamples {
+		costDistribution[competitor] = buildTokenSavingsDistributionMetric(samples)
+	}
+
+	return tokenSavingsDistributionReport{
+		TokensSaved:  buildTokenSavingsDistributionMetric(tokenSamples),
+		SavingsPct:   buildTokenSavingsDistributionMetric(savingsPctSamples),
+		CostSavedUSD: costDistribution,
+	}
+}
+
+func buildTokenSavingsDistributionMetric(samples []float64) tokenSavingsDistributionMetric {
+	if len(samples) == 0 {
+		return tokenSavingsDistributionMetric{}
+	}
+
+	total := 0.0
+	for _, sample := range samples {
+		total += sample
+	}
+	return tokenSavingsDistributionMetric{
+		Mean:   roundTokenSavingsFloat(total / float64(len(samples))),
+		Median: roundTokenSavingsFloat(tokenSavingsPercentile(samples, 50)),
+		P95:    roundTokenSavingsFloat(tokenSavingsPercentile(samples, 95)),
+	}
+}
+
+func buildTokenSavingsTrendSeries(
+	historicalSnapshots []telemetry.PersistedCumulativeSnapshot,
+	generatedAt time.Time,
+	withTotalTokens int,
+	currentSavings tokenSavingsDeltaReport,
+	pricing map[string]config.SavingsCompetitorPricing,
+) map[string][]tokenSavingsTrendPoint {
+	competitors := savings.OrderedCompetitors(pricing)
+	if len(competitors) == 0 {
+		return map[string][]tokenSavingsTrendPoint{}
+	}
+
+	trends := make(map[string][]tokenSavingsTrendPoint, len(competitors))
+	for _, competitor := range competitors {
+		trends[competitor] = make([]tokenSavingsTrendPoint, 0, len(historicalSnapshots)+1)
+	}
+
+	var previous telemetry.PersistedCumulativeSnapshot
+	hasPrevious := false
+	for _, snapshot := range historicalSnapshots {
+		delta := buildTokenSavingsSnapshotDelta(snapshot, previous, hasPrevious, pricing)
+		hasPrevious = true
+		previous = snapshot
+
+		baselineTokens := delta.TotalTokens + delta.TokensSaved
+		savingsPct := savingsRatio(baselineTokens, delta.TokensSaved)
+		for _, competitor := range competitors {
+			trends[competitor] = append(trends[competitor], tokenSavingsTrendPoint{
+				CapturedAtUTC: snapshot.CapturedAt.UTC().Format(time.RFC3339),
+				TokensSaved:   delta.TokensSaved,
+				CostSavedUSD:  roundTokenSavingsFloat(delta.CostSavedUSD[competitor]),
+				SavingsPct:    savingsPct,
+			})
+		}
+	}
+
+	for _, competitor := range competitors {
+		trends[competitor] = append(trends[competitor], tokenSavingsTrendPoint{
+			CapturedAtUTC: generatedAt.UTC().Format(time.RFC3339),
+			TokensSaved:   currentSavings.TokensSaved,
+			CostSavedUSD:  roundTokenSavingsFloat(currentSavings.CostSavedUSD[competitor]),
+			SavingsPct:    savingsRatio(withTotalTokens+currentSavings.TokensSaved, currentSavings.TokensSaved),
+		})
+	}
+	return trends
+}
+
+type tokenSavingsSnapshotDelta struct {
+	TotalTokens  int
+	TokensSaved  int
+	CostSavedUSD map[string]float64
+}
+
+func buildTokenSavingsSnapshotDelta(
+	current telemetry.PersistedCumulativeSnapshot,
+	previous telemetry.PersistedCumulativeSnapshot,
+	hasPrevious bool,
+	pricing map[string]config.SavingsCompetitorPricing,
+) tokenSavingsSnapshotDelta {
+	normalizedCurrentCost := normalizeTokenSavingsCostMap(current.Cumulative.CostAvoidedUSD, pricing)
+	if !hasPrevious {
+		return tokenSavingsSnapshotDelta{
+			TotalTokens:  max(0, current.Cumulative.TotalTokens),
+			TokensSaved:  max(0, current.Cumulative.TokensSaved),
+			CostSavedUSD: normalizedCurrentCost,
+		}
+	}
+
+	if current.Cumulative.TotalTokens < previous.Cumulative.TotalTokens ||
+		current.Cumulative.TokensSaved < previous.Cumulative.TokensSaved {
+		return tokenSavingsSnapshotDelta{
+			TotalTokens:  max(0, current.Cumulative.TotalTokens),
+			TokensSaved:  max(0, current.Cumulative.TokensSaved),
+			CostSavedUSD: normalizedCurrentCost,
+		}
+	}
+
+	normalizedPreviousCost := normalizeTokenSavingsCostMap(previous.Cumulative.CostAvoidedUSD, pricing)
+	return tokenSavingsSnapshotDelta{
+		TotalTokens:  current.Cumulative.TotalTokens - previous.Cumulative.TotalTokens,
+		TokensSaved:  current.Cumulative.TokensSaved - previous.Cumulative.TokensSaved,
+		CostSavedUSD: savings.DiffCostMap(normalizedCurrentCost, normalizedPreviousCost, pricing),
+	}
+}
+
+func normalizeTokenSavingsCostMap(
+	input map[string]float64,
+	pricing map[string]config.SavingsCompetitorPricing,
+) map[string]float64 {
+	normalized := make(map[string]float64, len(pricing))
+	for _, competitor := range savings.OrderedCompetitors(pricing) {
+		normalized[competitor] = roundTokenSavingsFloat(input[competitor])
+	}
+	return normalized
+}
+
+func loadTokenSavingsHistoricalSnapshots(
+	ctx context.Context,
+	storagePath string,
+) ([]telemetry.PersistedCumulativeSnapshot, error) {
+	if strings.TrimSpace(storagePath) == "" {
+		return nil, nil
+	}
+
+	store, err := storage.NewSQLiteTelemetryStore(storagePath)
+	if err != nil {
+		return nil, err
+	}
+	return store.LoadSnapshots(ctx, time.Time{})
+}
+
+func tokenSavingsPercentile(values []float64, percentile float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	if len(values) == 1 {
+		return values[0]
+	}
+
+	clamped := math.Max(0, math.Min(100, percentile))
+	sorted := slices.Clone(values)
+	slices.Sort(sorted)
+
+	position := (clamped / 100.0) * float64(len(sorted)-1)
+	lower := int(math.Floor(position))
+	upper := int(math.Ceil(position))
+	if lower == upper {
+		return sorted[lower]
+	}
+
+	weight := position - float64(lower)
+	return sorted[lower] + (sorted[upper]-sorted[lower])*weight
+}
+
+func roundTokenSavingsFloat(value float64) float64 {
+	return math.Round(value*1_000_000) / 1_000_000
+}
+
 func cloneAnyMap(source map[string]any) map[string]any {
 	if len(source) == 0 {
 		return map[string]any{}
@@ -766,6 +1039,7 @@ func cloneTokenSavingsCaseReports(input []tokenSavingsCaseReport) []tokenSavings
 		rowCopy.WithMCP.CostUSD = cloneFloatMap(row.WithMCP.CostUSD)
 		rowCopy.WithoutMCP.CostUSD = cloneFloatMap(row.WithoutMCP.CostUSD)
 		rowCopy.Savings.CostSavedUSD = cloneFloatMap(row.Savings.CostSavedUSD)
+		rowCopy.Savings.Scores = cloneTokenSavingsCompetitorScores(row.Savings.Scores)
 		cloned = append(cloned, rowCopy)
 	}
 	return cloned
@@ -776,6 +1050,19 @@ func cloneFloatMap(input map[string]float64) map[string]float64 {
 		return map[string]float64{}
 	}
 	cloned := make(map[string]float64, len(input))
+	for key, value := range input {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func cloneTokenSavingsCompetitorScores(
+	input map[string]tokenSavingsCompetitorScore,
+) map[string]tokenSavingsCompetitorScore {
+	if len(input) == 0 {
+		return map[string]tokenSavingsCompetitorScore{}
+	}
+	cloned := make(map[string]tokenSavingsCompetitorScore, len(input))
 	for key, value := range input {
 		cloned[key] = value
 	}
