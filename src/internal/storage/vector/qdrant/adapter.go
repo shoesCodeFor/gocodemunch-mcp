@@ -3,6 +3,7 @@ package qdrant
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,11 +21,12 @@ import (
 )
 
 const (
-	defaultUpsertBatchSize       = 256
-	defaultResponseLimitBytes    = 32 << 20
-	defaultCollectionDistance    = "Cosine"
-	defaultNamespacePayloadField = "namespace"
-	defaultMetadataPayloadField  = "metadata"
+	defaultUpsertBatchSize        = 256
+	defaultResponseLimitBytes     = 32 << 20
+	defaultCollectionDistance     = "Cosine"
+	defaultNamespacePayloadField  = "namespace"
+	defaultMetadataPayloadField   = "metadata"
+	defaultOriginalIDPayloadField = "record_id"
 )
 
 // Adapter implements Qdrant-backed vector storage operations.
@@ -321,13 +323,19 @@ func (a *Adapter) Upsert(
 			)
 		}
 
+		storedID := qdrantStoredPointID(id)
+		payload := map[string]any{
+			defaultNamespacePayloadField: namespace,
+			defaultMetadataPayloadField:  normalizeMetadata(record.Metadata),
+		}
+		if storedID != id {
+			payload[defaultOriginalIDPayloadField] = id
+		}
+
 		points = append(points, qdrantPoint{
-			ID:     id,
-			Vector: cloneEmbedding(record.Embedding),
-			Payload: map[string]any{
-				defaultNamespacePayloadField: namespace,
-				defaultMetadataPayloadField:  normalizeMetadata(record.Metadata),
-			},
+			ID:      storedID,
+			Vector:  cloneEmbedding(record.Embedding),
+			Payload: payload,
 		})
 	}
 
@@ -461,6 +469,9 @@ func (a *Adapter) Query(
 		if payloadNamespace := strings.TrimSpace(readStringValue(point.Payload, defaultNamespacePayloadField)); payloadNamespace != "" {
 			recordNamespace = payloadNamespace
 		}
+		if originalID := strings.TrimSpace(readStringValue(point.Payload, defaultOriginalIDPayloadField)); originalID != "" {
+			id = originalID
+		}
 
 		score := point.Score
 		if math.IsNaN(score) || math.IsInf(score, 0) {
@@ -534,6 +545,7 @@ func (a *Adapter) Delete(
 			"delete vectors: ids must include at least one non-empty value",
 		)
 	}
+	lookupIDs := normalizeStoredPointIDs(ids)
 
 	_, exists, err := a.readCollectionVectorDimension(ctx)
 	if err != nil {
@@ -544,7 +556,7 @@ func (a *Adapter) Delete(
 	}
 
 	lookupRequest := qdrantPointLookupRequest{
-		IDs:         ids,
+		IDs:         lookupIDs,
 		WithPayload: true,
 		WithVector:  false,
 	}
@@ -1214,6 +1226,28 @@ func normalizeIDs(ids []string) []string {
 	return normalized
 }
 
+func normalizeStoredPointIDs(ids []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(ids))
+	normalized := make([]string, 0, len(ids))
+	for _, id := range ids {
+		storedID := qdrantStoredPointID(id)
+		if storedID == "" {
+			continue
+		}
+		if _, ok := seen[storedID]; ok {
+			continue
+		}
+		seen[storedID] = struct{}{}
+		normalized = append(normalized, storedID)
+	}
+	sort.Strings(normalized)
+	return normalized
+}
+
 func validateEmbedding(embedding []float32) error {
 	if len(embedding) == 0 {
 		return errors.New("embedding must be non-empty")
@@ -1313,6 +1347,50 @@ func normalizePointID(raw any) (string, error) {
 	default:
 		return "", fmt.Errorf("query vectors: unsupported record id type %T", raw)
 	}
+}
+
+func qdrantStoredPointID(raw string) string {
+	id := strings.TrimSpace(raw)
+	if id == "" {
+		return ""
+	}
+	if _, err := strconv.ParseUint(id, 10, 64); err == nil {
+		return id
+	}
+	if isUUIDLike(id) {
+		return strings.ToLower(id)
+	}
+
+	sum := sha1.Sum([]byte(id))
+	uuid := sum[:16]
+
+	// RFC 4122 variant/version bits for deterministic UUID-like ids.
+	uuid[6] = (uuid[6] & 0x0f) | 0x50
+	uuid[8] = (uuid[8] & 0x3f) | 0x80
+
+	return fmt.Sprintf("%x-%x-%x-%x-%x", uuid[0:4], uuid[4:6], uuid[6:8], uuid[8:10], uuid[10:16])
+}
+
+func isUUIDLike(raw string) bool {
+	parts := strings.Split(strings.ToLower(strings.TrimSpace(raw)), "-")
+	if len(parts) != 5 {
+		return false
+	}
+	expectedLengths := []int{8, 4, 4, 4, 12}
+	for index, part := range parts {
+		if len(part) != expectedLengths[index] {
+			return false
+		}
+		for _, ch := range part {
+			switch {
+			case ch >= '0' && ch <= '9':
+			case ch >= 'a' && ch <= 'f':
+			default:
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func decodePointVector(raw any) ([]float32, error) {

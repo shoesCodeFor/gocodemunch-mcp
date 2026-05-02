@@ -248,6 +248,135 @@ func TestQdrantQueryErrorTranslationFromHTTPStatus(t *testing.T) {
 	}
 }
 
+func TestQdrantUpsertStoresOriginalStringIDsAndQueryRestoresThem(t *testing.T) {
+	t.Parallel()
+
+	var (
+		callCount      int
+		upsertPayload  map[string]any
+		storedPointID  string
+		originalRecord = "sha1-like-chunk-id"
+	)
+
+	adapter, err := NewAdapter(
+		"http://qdrant.test",
+		"",
+		"test-collection",
+		WithHTTPClient(&http.Client{
+			Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				callCount++
+				switch callCount {
+				case 1:
+					if request.Method != http.MethodGet || request.URL.Path != "/collections/test-collection" {
+						t.Fatalf("unexpected bootstrap request: %s %s", request.Method, request.URL.Path)
+					}
+					return jsonResponse(http.StatusNotFound, `{"status":{"error":"not found"},"result":null}`), nil
+				case 2:
+					if request.Method != http.MethodPut || request.URL.Path != "/collections/test-collection" {
+						t.Fatalf("unexpected create collection request: %s %s", request.Method, request.URL.Path)
+					}
+					return jsonResponse(http.StatusOK, `{"status":"ok","result":{"operation_id":1}}`), nil
+				case 3:
+					if request.Method != http.MethodPut || request.URL.Path != "/collections/test-collection/points" {
+						t.Fatalf("unexpected upsert request: %s %s", request.Method, request.URL.Path)
+					}
+					if err := decodeRequestBody(request, &upsertPayload); err != nil {
+						t.Fatalf("decode upsert payload: %v", err)
+					}
+					points, ok := upsertPayload["points"].([]any)
+					if !ok || len(points) != 1 {
+						t.Fatalf("unexpected upsert points payload: %#v", upsertPayload)
+					}
+					point, ok := points[0].(map[string]any)
+					if !ok {
+						t.Fatalf("unexpected point payload shape: %#v", points[0])
+					}
+					storedPointID, ok = point["id"].(string)
+					if !ok || strings.TrimSpace(storedPointID) == "" {
+						t.Fatalf("expected stored point id in upsert payload: %#v", point)
+					}
+					if storedPointID == originalRecord {
+						t.Fatalf("expected arbitrary string id to be normalized before qdrant upsert, got %#v", point)
+					}
+					payload, ok := point["payload"].(map[string]any)
+					if !ok {
+						t.Fatalf("expected payload map in upsert request: %#v", point)
+					}
+					if got := readStringValue(payload, defaultOriginalIDPayloadField); got != originalRecord {
+						t.Fatalf("expected original record id in qdrant payload, got %#v", payload)
+					}
+					return jsonResponse(http.StatusOK, `{"status":"ok","result":{"operation_id":2}}`), nil
+				case 4:
+					if request.Method != http.MethodPost || request.URL.Path != "/collections/test-collection/points/search" {
+						t.Fatalf("unexpected search request: %s %s", request.Method, request.URL.Path)
+					}
+					return jsonResponse(http.StatusOK, `{
+						"status":"ok",
+						"result":[
+							{
+								"id":"`+storedPointID+`",
+								"score":1,
+								"vector":[1,0],
+								"payload":{
+									"namespace":"repo/main",
+									"record_id":"`+originalRecord+`",
+									"metadata":{"repo":"repo","path":"a.go","chunk_id":"`+originalRecord+`"}
+								}
+							}
+						]
+					}`), nil
+				default:
+					t.Fatalf("unexpected extra qdrant request #%d: %s %s", callCount, request.Method, request.URL.Path)
+					return nil, nil
+				}
+			}),
+		}),
+	)
+	if err != nil {
+		t.Fatalf("create qdrant adapter: %v", err)
+	}
+
+	upsertResponse, err := adapter.Upsert(context.Background(), indexing.VectorUpsertRequest{
+		Namespace: "repo/main",
+		Records: []indexing.VectorRecord{
+			{
+				ID:        originalRecord,
+				Namespace: "repo/main",
+				Embedding: []float32{1, 0},
+				Metadata: indexing.VectorMetadata{
+					Repo:    "repo",
+					Path:    "a.go",
+					ChunkID: originalRecord,
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("upsert arbitrary string id: %v", err)
+	}
+	if upsertResponse.Upserted != 1 {
+		t.Fatalf("unexpected upsert count: %#v", upsertResponse)
+	}
+	if storedPointID != qdrantStoredPointID(originalRecord) {
+		t.Fatalf("unexpected stored qdrant point id: got %q want %q", storedPointID, qdrantStoredPointID(originalRecord))
+	}
+
+	queryResponse, err := adapter.Query(context.Background(), indexing.VectorQueryRequest{
+		Namespace: "repo/main",
+		Embedding: []float32{1, 0},
+		TopK:      1,
+	})
+	if err != nil {
+		t.Fatalf("query restored original qdrant record id: %v", err)
+	}
+	if got := queryMatchIDs(queryResponse.Matches); !reflect.DeepEqual(got, []string{originalRecord}) {
+		t.Fatalf("expected query response to restore original record id, got %#v", got)
+	}
+	if callCount != 4 {
+		t.Fatalf("unexpected qdrant request count: got %d, want 4", callCount)
+	}
+}
+
 func queryMatchIDs(matches []indexing.VectorQueryMatch) []string {
 	ids := make([]string, len(matches))
 	for index, match := range matches {

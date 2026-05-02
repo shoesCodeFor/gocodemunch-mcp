@@ -8,6 +8,7 @@ import (
 
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/config"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/storage"
+	"github.com/jgravelle/gocodemunch-mcp/src/internal/telemetry"
 )
 
 func TestNormalizeTokenSavingsModesRequiresExplicitBothModes(t *testing.T) {
@@ -207,5 +208,234 @@ func TestBuildTokenSavingsTrendSeriesFromBenchmarkRuns(t *testing.T) {
 	}
 	if len(trends["claude_code"]) != 3 || len(trends["amp"]) != 3 {
 		t.Fatalf("expected all competitors to receive the merged trend series, got %#v", trends)
+	}
+}
+
+func TestBuildTokenSavingsTrendSeriesFromTelemetrySnapshots(t *testing.T) {
+	t.Parallel()
+
+	pricing := map[string]config.SavingsCompetitorPricing{
+		"claude_code": {InputUSDPerMTok: 3.0, OutputUSDPerMTok: 15.0},
+		"codex":       {InputUSDPerMTok: 1.5, OutputUSDPerMTok: 6.0},
+	}
+
+	trends := buildTokenSavingsTrendSeries(
+		[]telemetry.PersistedCumulativeSnapshot{
+			{
+				CapturedAt: time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC),
+				Cumulative: telemetry.CumulativeSnapshot{
+					TotalTokens:    70,
+					TokensSaved:    30,
+					CostAvoidedUSD: map[string]float64{"claude_code": 0.024, "codex": 0.012},
+				},
+			},
+			{
+				CapturedAt: time.Date(2026, 5, 1, 12, 5, 0, 0, time.UTC),
+				Cumulative: telemetry.CumulativeSnapshot{
+					TotalTokens:    130,
+					TokensSaved:    50,
+					CostAvoidedUSD: map[string]float64{"claude_code": 0.04, "codex": 0.02},
+				},
+			},
+		},
+		time.Date(2026, 5, 1, 12, 10, 0, 0, time.UTC),
+		75,
+		tokenSavingsDeltaReport{
+			TokensSaved:  25,
+			SavingsPct:   0.25,
+			CostSavedUSD: map[string]float64{"claude_code": 0.01, "codex": 0.005},
+		},
+		pricing,
+	)
+
+	wantCodex := []tokenSavingsTrendPoint{
+		{
+			CapturedAtUTC: "2026-05-01T12:00:00Z",
+			TokensSaved:   30,
+			CostSavedUSD:  0.012,
+			SavingsPct:    0.3,
+		},
+		{
+			CapturedAtUTC: "2026-05-01T12:05:00Z",
+			TokensSaved:   20,
+			CostSavedUSD:  0.008,
+			SavingsPct:    0.25,
+		},
+		{
+			CapturedAtUTC: "2026-05-01T12:10:00Z",
+			TokensSaved:   25,
+			CostSavedUSD:  0.005,
+			SavingsPct:    0.25,
+		},
+	}
+	if !reflect.DeepEqual(trends["codex"], wantCodex) {
+		t.Fatalf("unexpected codex telemetry trend series\nwant=%#v\ngot=%#v", wantCodex, trends["codex"])
+	}
+	if len(trends["claude_code"]) != 3 {
+		t.Fatalf("expected claude_code telemetry trend series to mirror codex length, got %#v", trends)
+	}
+}
+
+func TestBuildTokenSavingsSnapshotDeltaFallsBackOnCounterRegression(t *testing.T) {
+	t.Parallel()
+
+	pricing := map[string]config.SavingsCompetitorPricing{
+		"claude_code": {InputUSDPerMTok: 3.0, OutputUSDPerMTok: 15.0},
+		"codex":       {InputUSDPerMTok: 1.5, OutputUSDPerMTok: 6.0},
+	}
+
+	delta := buildTokenSavingsSnapshotDelta(
+		telemetry.PersistedCumulativeSnapshot{
+			Cumulative: telemetry.CumulativeSnapshot{
+				TotalTokens:    12,
+				TokensSaved:    5,
+				CostAvoidedUSD: map[string]float64{"claude_code": 0.0042, "codex": 0.0021},
+			},
+		},
+		telemetry.PersistedCumulativeSnapshot{
+			Cumulative: telemetry.CumulativeSnapshot{
+				TotalTokens:    40,
+				TokensSaved:    18,
+				CostAvoidedUSD: map[string]float64{"claude_code": 0.014, "codex": 0.007},
+			},
+		},
+		true,
+		pricing,
+	)
+
+	want := tokenSavingsSnapshotDelta{
+		TotalTokens: 12,
+		TokensSaved: 5,
+		CostSavedUSD: map[string]float64{
+			"claude_code": 0.0042,
+			"codex":       0.0021,
+		},
+	}
+	if !reflect.DeepEqual(delta, want) {
+		t.Fatalf("unexpected counter-regression delta\nwant=%#v\ngot=%#v", want, delta)
+	}
+}
+
+func TestRenderTokenSavingsMarkdownRunReportRendersMatrixSections(t *testing.T) {
+	t.Parallel()
+
+	pricing := map[string]config.SavingsCompetitorPricing{
+		"claude_code": {InputUSDPerMTok: 3.0, OutputUSDPerMTok: 15.0},
+		"codex":       {InputUSDPerMTok: 1.5, OutputUSDPerMTok: 6.0},
+	}
+
+	report := tokenSavingsSmokeReport{
+		GeneratedAtUTC:    "2026-05-02T14:15:16Z",
+		Mode:              evalModeTokenSavings,
+		Dataset:           "token-savings-render-test",
+		SuiteVersion:      "v-render",
+		FixturesDir:       "tests-go/evals/fixtures/token-savings-smoke",
+		Competitors:       []string{"claude_code", "codex"},
+		TrendWindow:       "last_30d",
+		CompetitorPricing: pricing,
+		CombinationCount:  2,
+		Combinations: []tokenSavingsCombinationReport{
+			{
+				Provider:    "ollama",
+				Backend:     "sqlite",
+				Model:       "stub-ollama",
+				IndexedRepo: "token-savings-render-test",
+				FileCount:   2,
+				Cases: []tokenSavingsCaseReport{
+					{
+						ID:         "search-timeout-default",
+						Tool:       "search_text",
+						Modes:      append([]string(nil), tokenSavingsRequiredModes...),
+						WithMCP:    tokenSavingsModeCaseMetrics{TotalTokens: 28},
+						WithoutMCP: tokenSavingsModeCaseMetrics{TotalTokens: 52},
+						Savings:    tokenSavingsDeltaReport{TokensSaved: 24, SavingsPct: 0.461538},
+					},
+				},
+				Aggregate: tokenSavingsAggregateReport{
+					CaseCount: 1,
+					WithMCP: tokenSavingsModeAggregateMetrics{
+						InputTokens:  18,
+						OutputTokens: 10,
+						TotalTokens:  28,
+						CostUSD:      map[string]float64{"claude_code": 0.0002, "codex": 0.0001},
+					},
+					WithoutMCP: tokenSavingsModeAggregateMetrics{
+						InputTokens: 52,
+						TotalTokens: 52,
+						CostUSD:     map[string]float64{"claude_code": 0.0004, "codex": 0.0002},
+					},
+					Savings: tokenSavingsDeltaReport{
+						TokensSaved:  24,
+						SavingsPct:   0.461538,
+						CostSavedUSD: map[string]float64{"claude_code": 0.0002, "codex": 0.0001},
+					},
+				},
+			},
+			{
+				Provider:    "vllm",
+				Backend:     "qdrant",
+				Model:       "stub-vllm",
+				IndexedRepo: "token-savings-render-test",
+				FileCount:   2,
+				Cases: []tokenSavingsCaseReport{
+					{
+						ID:         "importers-http-client",
+						Tool:       "find_importers",
+						Modes:      append([]string(nil), tokenSavingsRequiredModes...),
+						WithMCP:    tokenSavingsModeCaseMetrics{TotalTokens: 32},
+						WithoutMCP: tokenSavingsModeCaseMetrics{TotalTokens: 60},
+						Savings:    tokenSavingsDeltaReport{TokensSaved: 28, SavingsPct: 0.466667},
+					},
+				},
+				Aggregate: tokenSavingsAggregateReport{
+					CaseCount: 1,
+					WithMCP: tokenSavingsModeAggregateMetrics{
+						InputTokens:  20,
+						OutputTokens: 12,
+						TotalTokens:  32,
+						CostUSD:      map[string]float64{"claude_code": 0.00024, "codex": 0.00012},
+					},
+					WithoutMCP: tokenSavingsModeAggregateMetrics{
+						InputTokens: 60,
+						TotalTokens: 60,
+						CostUSD:     map[string]float64{"claude_code": 0.00045, "codex": 0.000225},
+					},
+					Savings: tokenSavingsDeltaReport{
+						TokensSaved:  28,
+						SavingsPct:   0.466667,
+						CostSavedUSD: map[string]float64{"claude_code": 0.00021, "codex": 0.000105},
+					},
+				},
+			},
+		},
+	}
+
+	content := renderTokenSavingsMarkdownRunReport(
+		report,
+		"Auto Run Docs/Working/evals/token-savings-render-test.json",
+		[]string{"Eval-Index", "Savings-Index", "20260501-130000z-token-savings-render-test"},
+	)
+
+	for _, expected := range []string{
+		"type: report",
+		"title: Token Savings Run token-savings-render-test 2026-05-02T14:15:16Z",
+		"created: 2026-05-02",
+		"- JSON Artifact: `Auto Run Docs/Working/evals/token-savings-render-test.json`",
+		"- Combination Count: `2`",
+		"  - backend-qdrant",
+		"  - backend-sqlite",
+		"  - competitor-claude-code",
+		"  - competitor-codex",
+		"  - '[[20260501-130000z-token-savings-render-test]]'",
+		"| ollama | sqlite | stub-ollama | token-savings-render-test | 2 | 24 | 46.15% |",
+		"| vllm | qdrant | stub-vllm | token-savings-render-test | 2 | 28 | 46.67% |",
+		"### ollama / sqlite",
+		"### vllm / qdrant",
+		"| search-timeout-default | search_text | 28 | 52 | 24 | 46.15% |",
+		"| importers-http-client | find_importers | 32 | 60 | 28 | 46.67% |",
+	} {
+		if !strings.Contains(content, expected) {
+			t.Fatalf("expected markdown report to include %q\nfull report:\n%s", expected, content)
+		}
 	}
 }

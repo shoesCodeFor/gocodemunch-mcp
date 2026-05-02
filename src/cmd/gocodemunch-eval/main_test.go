@@ -1778,6 +1778,132 @@ func TestRunWithArgsIntegrationReportOutputDeterminism(t *testing.T) {
 	}
 }
 
+func TestRunWithArgsIntegrationTokenSavingsMatrixWritesJSONAndMarkdown(t *testing.T) {
+	fixturesDir := writeTokenSavingsMarkdownFixtures(t)
+
+	embedServer := newTokenSavingsEvalStubServer(t, 0)
+	defer embedServer.Close()
+
+	storageRoot := t.TempDir()
+	setTokenSavingsRunnerIntegrationEnv(t, embedServer.URL, storageRoot)
+
+	fixedNow := time.Date(2026, time.May, 2, 14, 15, 16, 0, time.UTC)
+	restore := overrideEvalRunnerHooks(
+		config.Load,
+		newVectorBackend,
+		newEmbedder,
+		closeVectorBackend,
+		func() time.Time { return fixedNow },
+	)
+	defer restore()
+
+	reportDir := filepath.Join(t.TempDir(), "docs", "evals", "savings-runs")
+	outPath := filepath.Join(t.TempDir(), "outputs", "token-savings-integration.json")
+	args := []string{
+		"--mode", "token-savings-smoke",
+		"--fixtures-dir", fixturesDir,
+		"--providers", "ollama,vllm",
+		"--backends", "sqlite",
+		"--markdown-report-dir", reportDir,
+		"--out", outPath,
+		"--skip-markdown-report=false",
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runWithArgs(args, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected token savings integration run success, got code=%d stderr=%s", code, stderr.String())
+	}
+
+	report := tokenSavingsSmokeReport{}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("decode token savings integration report: %v output=%s", err, stdout.String())
+	}
+
+	if report.Mode != evalModeTokenSavings {
+		t.Fatalf("expected token savings mode %q, got %#v", evalModeTokenSavings, report)
+	}
+	if len(report.Combinations) != 2 || report.CombinationCount != 2 {
+		t.Fatalf("expected two token savings combinations, got %#v", report.Combinations)
+	}
+	if !reflect.DeepEqual(report.Competitors, []string{"amp", "claude_code", "codex"}) {
+		t.Fatalf("expected all default competitors in stable order, got %#v", report.Competitors)
+	}
+	if len(report.Cases) != 1 || report.Aggregate.CaseCount != 1 {
+		t.Fatalf("expected one top-level savings case from the first combination, got %#v", report)
+	}
+
+	expectedProviders := []string{"ollama", "vllm"}
+	for index, provider := range expectedProviders {
+		combo := report.Combinations[index]
+		if combo.Provider != provider || combo.Backend != "sqlite" {
+			t.Fatalf("unexpected token savings combo at index %d: %#v", index, combo)
+		}
+		if combo.Aggregate.CaseCount != 1 || len(combo.Cases) != 1 {
+			t.Fatalf("expected one executed savings case in combo %d, got %#v", index, combo)
+		}
+		row := combo.Cases[0]
+		if !reflect.DeepEqual(row.Modes, tokenSavingsRequiredModes) {
+			t.Fatalf("expected both token savings modes in combo %d, got %#v", index, row.Modes)
+		}
+		if row.WithMCP.TotalTokens <= 0 || row.WithoutMCP.TotalTokens <= 0 {
+			t.Fatalf("expected non-zero token counts in combo %d, got %#v", index, row)
+		}
+		if row.Savings.TokensSaved == 0 && row.Savings.SavingsPct == 0 {
+			t.Fatalf("expected scoring output in combo %d, got %#v", index, row.Savings)
+		}
+		if len(row.Savings.Scores) != 3 {
+			t.Fatalf("expected all competitor scorecards in combo %d, got %#v", index, row.Savings)
+		}
+		if len(combo.Aggregate.Trends["amp"]) != 1 || len(combo.Aggregate.Trends["claude_code"]) != 1 || len(combo.Aggregate.Trends["codex"]) != 1 {
+			t.Fatalf("expected one current trend point per competitor in combo %d, got %#v", index, combo.Aggregate.Trends)
+		}
+	}
+
+	writtenJSON, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read token savings integration json artifact: %v", err)
+	}
+	writtenReport := tokenSavingsSmokeReport{}
+	if err := json.Unmarshal(writtenJSON, &writtenReport); err != nil {
+		t.Fatalf("decode token savings integration json artifact: %v", err)
+	}
+	if !reflect.DeepEqual(writtenReport.Combinations, report.Combinations) {
+		t.Fatalf("expected written token savings artifact to match stdout report\nstdout=%#v\nwritten=%#v", report.Combinations, writtenReport.Combinations)
+	}
+
+	reportPath := filepath.Join(reportDir, "20260502-141516z-token-savings-markdown-test.md")
+	contentBytes, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("read token savings integration markdown report: %v", err)
+	}
+	content := string(contentBytes)
+	for _, expected := range []string{
+		"type: report",
+		"title: Token Savings Run token-savings-markdown-test 2026-05-02T14:15:16Z",
+		"- JSON Artifact: `" + outPath + "`",
+		"| ollama | sqlite | stub-ollama |",
+		"| vllm | sqlite | stub-vllm |",
+		"### ollama / sqlite",
+		"### vllm / sqlite",
+		"- '[[Savings-Index]]'",
+	} {
+		if !strings.Contains(content, expected) {
+			t.Fatalf("expected integration markdown report to include %q\nfull report:\n%s", expected, content)
+		}
+	}
+
+	indexPath := filepath.Join(filepath.Dir(reportDir), tokenSavingsIndexFileName)
+	indexBytes, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatalf("read token savings integration index: %v", err)
+	}
+	if !strings.Contains(string(indexBytes), "[[20260502-141516z-token-savings-markdown-test]]") {
+		t.Fatalf("expected token savings index to link the integration run, index:\n%s", string(indexBytes))
+	}
+}
+
 func writeEvalFixtures(
 	t *testing.T,
 	corpus fixtureCorpus,
@@ -1906,6 +2032,26 @@ func setEvalRunnerIntegrationEnv(t *testing.T, ollamaBaseURL string, storagePath
 	}
 }
 
+func setTokenSavingsRunnerIntegrationEnv(t *testing.T, baseURL string, storagePath string) {
+	t.Helper()
+
+	t.Setenv("CODE_INDEX_PATH", storagePath)
+	t.Setenv("VECTOR_BACKEND", "sqlite")
+	t.Setenv("VECTOR_TOP_K", "8")
+	t.Setenv("VECTOR_QUERY_TIMEOUT_MS", "5000")
+	t.Setenv("VECTOR_LEXICAL_WEIGHT", "0.5")
+	t.Setenv("VECTOR_SEMANTIC_WEIGHT", "0.5")
+	t.Setenv("EMBEDDING_PROVIDER", "ollama")
+	t.Setenv("EMBEDDING_MODEL", "stub-ollama")
+	t.Setenv("OLLAMA_BASE_URL", strings.TrimSpace(baseURL))
+	t.Setenv("VLLM_BASE_URL", strings.TrimSpace(baseURL))
+	t.Setenv("VLLM_MODEL", "stub-vllm")
+	t.Setenv("VLLM_API_KEY", "")
+	t.Setenv("QDRANT_URL", "")
+	t.Setenv("QDRANT_COLLECTION", "")
+	t.Setenv("QDRANT_API_KEY", "")
+}
+
 func newOllamaEvalStubServer(t *testing.T, delay time.Duration) *httptest.Server {
 	t.Helper()
 
@@ -1937,6 +2083,57 @@ func newOllamaEvalStubServer(t *testing.T, delay time.Duration) *httptest.Server
 			"model":      strings.TrimSpace(payload.Model),
 			"embeddings": embeddings,
 		})
+	}))
+}
+
+func newTokenSavingsEvalStubServer(t *testing.T, delay time.Duration) *httptest.Server {
+	t.Helper()
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+
+		var payload struct {
+			Model string   `json:"model"`
+			Input []string `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		switch r.URL.Path {
+		case "/api/embed":
+			embeddings := make([][]float32, len(payload.Input))
+			for index, input := range payload.Input {
+				embeddings[index] = evalFixtureEmbedding(input)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"model":      strings.TrimSpace(payload.Model),
+				"embeddings": embeddings,
+			})
+		case "/embeddings":
+			data := make([]map[string]any, 0, len(payload.Input))
+			for index, input := range payload.Input {
+				data = append(data, map[string]any{
+					"index":     index,
+					"embedding": evalFixtureEmbedding(input),
+				})
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"model": strings.TrimSpace(payload.Model),
+				"data":  data,
+			})
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 }
 

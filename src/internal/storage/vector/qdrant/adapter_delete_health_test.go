@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -48,7 +49,11 @@ func TestQdrantDeleteFiltersByNamespace(t *testing.T) {
 					if err := decodeRequestBody(request, &payload); err != nil {
 						t.Fatalf("decode point lookup payload: %v", err)
 					}
-					if got, want := payload.IDs, []string{"id-a", "id-b", "id-c"}; !reflect.DeepEqual(got, want) {
+					if got, want := payload.IDs, []string{
+						qdrantStoredPointID("id-a"),
+						qdrantStoredPointID("id-b"),
+						qdrantStoredPointID("id-c"),
+					}; !reflect.DeepEqual(got, want) {
 						t.Fatalf("unexpected normalized ids: got %#v, want %#v", got, want)
 					}
 					if !payload.WithPayload || payload.WithVector {
@@ -58,9 +63,9 @@ func TestQdrantDeleteFiltersByNamespace(t *testing.T) {
 					return jsonResponse(http.StatusOK, `{
 						"status":"ok",
 						"result":[
-							{"id":"id-a","payload":{"namespace":"repo/main"}},
-							{"id":"id-b","payload":{"namespace":"repo/other"}},
-							{"id":"id-c","payload":{"namespace":"repo/main"}}
+							{"id":"`+qdrantStoredPointID("id-a")+`","payload":{"namespace":"repo/main","record_id":"id-a"}},
+							{"id":"`+qdrantStoredPointID("id-b")+`","payload":{"namespace":"repo/other","record_id":"id-b"}},
+							{"id":"`+qdrantStoredPointID("id-c")+`","payload":{"namespace":"repo/main","record_id":"id-c"}}
 						]
 					}`), nil
 				case 3:
@@ -99,7 +104,12 @@ func TestQdrantDeleteFiltersByNamespace(t *testing.T) {
 	if response.Deleted != 2 {
 		t.Fatalf("unexpected delete count: got %d, want 2", response.Deleted)
 	}
-	if got, want := deletedPointIDs, []string{"id-a", "id-c"}; !reflect.DeepEqual(got, want) {
+	wantDeletedIDs := []string{
+		qdrantStoredPointID("id-a"),
+		qdrantStoredPointID("id-c"),
+	}
+	sort.Strings(wantDeletedIDs)
+	if got, want := deletedPointIDs, wantDeletedIDs; !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected ids sent to qdrant delete: got %#v, want %#v", got, want)
 	}
 	if callCount != 3 {
