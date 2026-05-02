@@ -23,10 +23,12 @@ import (
 const (
 	defaultTokenSavingsFixturesDir   = "tests-go/evals/fixtures/token-savings-smoke"
 	defaultTokenSavingsOutputPath    = "Auto Run Docs/Working/evals/token-savings-smoke.json"
+	defaultTokenSavingsTrendWindow   = "last_30d"
 	tokenSavingsPromptSuiteFileName  = "prompt_suite.json"
 	serializedBytesPerEstimatedToken = 4.0
 	tokenSavingsModeWithMCP          = "with_mcp"
 	tokenSavingsModeWithoutMCP       = "without_mcp"
+	tokenSavingsTrendWindowAll       = "all"
 )
 
 var tokenSavingsSupportedTools = map[string]struct{}{
@@ -70,6 +72,8 @@ type tokenSavingsSmokeReport struct {
 	Dataset           string                                     `json:"dataset"`
 	SuiteVersion      string                                     `json:"suite_version"`
 	FixturesDir       string                                     `json:"fixtures_dir"`
+	Competitors       []string                                   `json:"competitors"`
+	TrendWindow       string                                     `json:"trend_window"`
 	IndexedRepo       string                                     `json:"indexed_repo"`
 	FileCount         int                                        `json:"file_count"`
 	CompetitorPricing map[string]config.SavingsCompetitorPricing `json:"competitor_pricing_usd_per_mtok"`
@@ -172,6 +176,12 @@ type tokenSavingsExecutionContext struct {
 	pricing         map[string]config.SavingsCompetitorPricing
 }
 
+type tokenSavingsRunOptions struct {
+	competitorPricing map[string]config.SavingsCompetitorPricing
+	trendWindow       string
+	trendStartAt      time.Time
+}
+
 type tokenSavingsModeAdapter struct {
 	name    string
 	execute func(
@@ -200,6 +210,7 @@ func runTokenSavingsSmokeMode(
 	combinations []evalCombination,
 	keepData bool,
 	useCombinationDependencies bool,
+	options tokenSavingsRunOptions,
 ) (tokenSavingsSmokeReport, error) {
 	generatedAt := nowUTCFn().UTC()
 
@@ -219,7 +230,7 @@ func runTokenSavingsSmokeMode(
 	}
 	defer cleanupCorpus()
 
-	pricing, _ := savings.NormalizePricing(cfg.SavingsCompetitorPricing)
+	pricing := cloneTokenSavingsCompetitorPricing(options.competitorPricing)
 
 	documentsByPath := make(map[string]fixtureDocument, len(fixtures.Documents))
 	for _, doc := range fixtures.Documents {
@@ -241,13 +252,14 @@ func runTokenSavingsSmokeMode(
 			comboModel,
 		)
 		historicalRuns, err := loadTokenSavingsHistoricalRuns(ctx, cfg.StoragePath, storage.SavingsBenchmarkRunFilter{
-			Dataset:      fixtures.Dataset,
-			SuiteVersion: fixtures.SuiteVersion,
-			Mode:         evalModeTokenSavings,
-			Provider:     combo.Provider,
-			Backend:      combo.Backend,
-			Model:        comboModel,
-			ExcludeRunID: benchmarkRunID,
+			Dataset:           fixtures.Dataset,
+			SuiteVersion:      fixtures.SuiteVersion,
+			Mode:              evalModeTokenSavings,
+			Provider:          combo.Provider,
+			Backend:           combo.Backend,
+			Model:             comboModel,
+			ExcludeRunID:      benchmarkRunID,
+			CapturedAtOrAfter: options.trendStartAt,
 		})
 		if err != nil {
 			historicalRuns = nil
@@ -300,6 +312,8 @@ func runTokenSavingsSmokeMode(
 		Dataset:           fixtures.Dataset,
 		SuiteVersion:      fixtures.SuiteVersion,
 		FixturesDir:       fixturesDir,
+		Competitors:       orderedTokenSavingsCompetitors(pricing),
+		TrendWindow:       options.trendWindow,
 		CompetitorPricing: pricing,
 		CombinationCount:  len(combinationReports),
 		Combinations:      combinationReports,
@@ -458,13 +472,13 @@ func runTokenSavingsCombination(
 		InputTokens:  totalWithInput,
 		OutputTokens: totalWithOutput,
 		TotalTokens:  totalWithInput + totalWithOutput,
-		CostUSD:      savings.CostsForTokens(pricing, totalWithInput, totalWithOutput),
+		CostUSD:      filterTokenSavingsCostMap(savings.CostsForTokens(pricing, totalWithInput, totalWithOutput), pricing),
 	}
 	aggregateWithout := tokenSavingsModeAggregateMetrics{
 		InputTokens:  totalWithoutInput,
 		OutputTokens: 0,
 		TotalTokens:  totalWithoutInput,
-		CostUSD:      savings.CostsForTokens(pricing, totalWithoutInput, 0),
+		CostUSD:      filterTokenSavingsCostMap(savings.CostsForTokens(pricing, totalWithoutInput, 0), pricing),
 	}
 	aggregateSavings := buildTokenSavingsDeltaReport(
 		aggregateWith.TotalTokens,
@@ -550,7 +564,7 @@ func runTokenSavingsWithMCPMode(
 		TotalTokens:        inputTokens + responseTokens,
 		ToolRequestTokens:  requestTokens,
 		ToolResponseTokens: responseTokens,
-		CostUSD:            savings.CostsForTokens(executionCtx.pricing, inputTokens, responseTokens),
+		CostUSD:            filterTokenSavingsCostMap(savings.CostsForTokens(executionCtx.pricing, inputTokens, responseTokens), executionCtx.pricing),
 	}, nil
 }
 
@@ -571,7 +585,7 @@ func runTokenSavingsWithoutMCPMode(
 		OutputTokens:  0,
 		TotalTokens:   inputTokens,
 		ContextTokens: contextTokens,
-		CostUSD:       savings.CostsForTokens(executionCtx.pricing, inputTokens, 0),
+		CostUSD:       filterTokenSavingsCostMap(savings.CostsForTokens(executionCtx.pricing, inputTokens, 0), executionCtx.pricing),
 	}, nil
 }
 
@@ -820,7 +834,7 @@ func buildTokenSavingsDeltaReport(
 ) tokenSavingsDeltaReport {
 	tokensSaved := withoutTotalTokens - withTotalTokens
 	savingsPct := savingsRatio(withoutTotalTokens, tokensSaved)
-	costSaved := savings.DiffCostMap(withoutCost, withCost, pricing)
+	costSaved := filterTokenSavingsCostMap(savings.DiffCostMap(withoutCost, withCost, pricing), pricing)
 	return tokenSavingsDeltaReport{
 		TokensSaved:  tokensSaved,
 		SavingsPct:   savingsPct,
@@ -835,7 +849,7 @@ func buildTokenSavingsCompetitorScores(
 	costSaved map[string]float64,
 	pricing map[string]config.SavingsCompetitorPricing,
 ) map[string]tokenSavingsCompetitorScore {
-	competitors := savings.OrderedCompetitors(pricing)
+	competitors := orderedTokenSavingsCompetitors(pricing)
 	if len(competitors) == 0 {
 		return map[string]tokenSavingsCompetitorScore{}
 	}
@@ -858,7 +872,7 @@ func buildTokenSavingsDistributionReport(
 	tokenSamples := make([]float64, 0, len(caseReports))
 	savingsPctSamples := make([]float64, 0, len(caseReports))
 	competitorCostSamples := make(map[string][]float64, len(pricing))
-	for _, competitor := range savings.OrderedCompetitors(pricing) {
+	for _, competitor := range orderedTokenSavingsCompetitors(pricing) {
 		competitorCostSamples[competitor] = make([]float64, 0, len(caseReports))
 	}
 
@@ -907,7 +921,7 @@ func buildTokenSavingsTrendSeriesFromBenchmarkRuns(
 	currentSavings tokenSavingsDeltaReport,
 	pricing map[string]config.SavingsCompetitorPricing,
 ) map[string][]tokenSavingsTrendPoint {
-	competitors := savings.OrderedCompetitors(pricing)
+	competitors := orderedTokenSavingsCompetitors(pricing)
 	if len(competitors) == 0 {
 		return map[string][]tokenSavingsTrendPoint{}
 	}
@@ -983,7 +997,7 @@ func buildTokenSavingsTrendSeries(
 	currentSavings tokenSavingsDeltaReport,
 	pricing map[string]config.SavingsCompetitorPricing,
 ) map[string][]tokenSavingsTrendPoint {
-	competitors := savings.OrderedCompetitors(pricing)
+	competitors := orderedTokenSavingsCompetitors(pricing)
 	if len(competitors) == 0 {
 		return map[string][]tokenSavingsTrendPoint{}
 	}
@@ -1066,7 +1080,7 @@ func normalizeTokenSavingsCostMap(
 	pricing map[string]config.SavingsCompetitorPricing,
 ) map[string]float64 {
 	normalized := make(map[string]float64, len(pricing))
-	for _, competitor := range savings.OrderedCompetitors(pricing) {
+	for _, competitor := range orderedTokenSavingsCompetitors(pricing) {
 		normalized[competitor] = roundTokenSavingsFloat(input[competitor])
 	}
 	return normalized
@@ -1258,6 +1272,12 @@ func renderTokenSavingsMarkdownRunReport(
 	b.WriteString(fmt.Sprintf("- Dataset: `%s`\n", report.Dataset))
 	b.WriteString(fmt.Sprintf("- Suite Version: `%s`\n", report.SuiteVersion))
 	b.WriteString(fmt.Sprintf("- Fixtures Dir: `%s`\n", report.FixturesDir))
+	if len(report.Competitors) > 0 {
+		b.WriteString(fmt.Sprintf("- Competitors: `%s`\n", strings.Join(report.Competitors, ",")))
+	}
+	if trendWindow := strings.TrimSpace(report.TrendWindow); trendWindow != "" {
+		b.WriteString(fmt.Sprintf("- Trend Window: `%s`\n", trendWindow))
+	}
 	b.WriteString(fmt.Sprintf("- Combination Count: `%d`\n", len(combinations)))
 	if outPath := strings.TrimSpace(jsonOutPath); outPath != "" {
 		b.WriteString(fmt.Sprintf("- JSON Artifact: `%s`\n", outPath))
@@ -1469,7 +1489,150 @@ func collectTokenSavingsMarkdownRelatedLinks(reportDir string, reportPath string
 func orderedTokenSavingsCompetitors(
 	pricing map[string]config.SavingsCompetitorPricing,
 ) []string {
-	return savings.OrderedCompetitors(pricing)
+	if len(pricing) == 0 {
+		return []string{}
+	}
+
+	competitors := make([]string, 0, len(pricing))
+	for competitor := range pricing {
+		normalized := strings.ToLower(strings.TrimSpace(competitor))
+		if normalized == "" {
+			continue
+		}
+		competitors = append(competitors, normalized)
+	}
+	slices.Sort(competitors)
+	return competitors
+}
+
+func filterTokenSavingsCostMap(
+	input map[string]float64,
+	pricing map[string]config.SavingsCompetitorPricing,
+) map[string]float64 {
+	competitors := orderedTokenSavingsCompetitors(pricing)
+	if len(competitors) == 0 {
+		return map[string]float64{}
+	}
+
+	filtered := make(map[string]float64, len(competitors))
+	for _, competitor := range competitors {
+		filtered[competitor] = roundTokenSavingsFloat(input[competitor])
+	}
+	return filtered
+}
+
+func cloneTokenSavingsCompetitorPricing(
+	input map[string]config.SavingsCompetitorPricing,
+) map[string]config.SavingsCompetitorPricing {
+	if len(input) == 0 {
+		return map[string]config.SavingsCompetitorPricing{}
+	}
+
+	cloned := make(map[string]config.SavingsCompetitorPricing, len(input))
+	for competitor, pricing := range input {
+		cloned[competitor] = pricing
+	}
+	return cloned
+}
+
+func resolveTokenSavingsRunOptions(
+	cfg config.Config,
+	rawCompetitors string,
+	rawTrendWindow string,
+	now time.Time,
+) (tokenSavingsRunOptions, error) {
+	normalizedPricing, _ := savings.NormalizePricing(cfg.SavingsCompetitorPricing)
+	selectedPricing, err := resolveTokenSavingsCompetitorPricing(normalizedPricing, rawCompetitors)
+	if err != nil {
+		return tokenSavingsRunOptions{}, err
+	}
+
+	normalizedTrendWindow, trendStartAt, err := resolveTokenSavingsTrendWindow(rawTrendWindow, now)
+	if err != nil {
+		return tokenSavingsRunOptions{}, err
+	}
+
+	return tokenSavingsRunOptions{
+		competitorPricing: selectedPricing,
+		trendWindow:       normalizedTrendWindow,
+		trendStartAt:      trendStartAt,
+	}, nil
+}
+
+func resolveTokenSavingsCompetitorPricing(
+	pricing map[string]config.SavingsCompetitorPricing,
+	raw string,
+) (map[string]config.SavingsCompetitorPricing, error) {
+	availableCompetitors := orderedTokenSavingsCompetitors(pricing)
+	if len(availableCompetitors) == 0 {
+		return map[string]config.SavingsCompetitorPricing{}, nil
+	}
+
+	requested := parseCSV(raw)
+	if len(requested) == 0 {
+		return cloneTokenSavingsCompetitorPricing(pricing), nil
+	}
+
+	selected := make(map[string]config.SavingsCompetitorPricing, len(requested))
+	for _, competitor := range requested {
+		normalized := strings.ToLower(strings.TrimSpace(competitor))
+		value, ok := pricing[normalized]
+		if !ok {
+			return nil, fmt.Errorf(
+				"unsupported competitor %q (allowed: %s)",
+				competitor,
+				strings.Join(availableCompetitors, ","),
+			)
+		}
+		selected[normalized] = value
+	}
+
+	if len(selected) == 0 {
+		return nil, errors.New("competitors must be non-empty")
+	}
+	return selected, nil
+}
+
+func resolveTokenSavingsTrendWindow(
+	raw string,
+	now time.Time,
+) (string, time.Time, error) {
+	normalized := strings.ToLower(strings.TrimSpace(raw))
+	if normalized == "" {
+		normalized = defaultTokenSavingsTrendWindow
+	}
+	if normalized == tokenSavingsTrendWindowAll {
+		return normalized, time.Time{}, nil
+	}
+
+	windows, err := telemetry.ParseTrendWindows([]string{normalized})
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	if len(windows) != 1 {
+		return "", time.Time{}, fmt.Errorf("trend window must resolve to exactly one value")
+	}
+
+	current := now.UTC()
+	if current.IsZero() {
+		current = time.Now().UTC()
+	}
+
+	switch windows[0] {
+	case telemetry.TrendWindowLast24H:
+		return normalized, current.Add(-24 * time.Hour), nil
+	case telemetry.TrendWindowLast7D:
+		return normalized, current.Add(-7 * 24 * time.Hour), nil
+	case telemetry.TrendWindowLast30D:
+		return normalized, current.Add(-30 * 24 * time.Hour), nil
+	default:
+		return "", time.Time{}, fmt.Errorf(
+			"unsupported trend window %q (allowed: %s,%s)",
+			raw,
+			tokenSavingsTrendWindowAll,
+			strings.Join(telemetry.SupportedTrendWindows(), ","),
+		)
+	}
 }
 
 func tokenSavingsReportCombinations(report tokenSavingsSmokeReport) []tokenSavingsCombinationReport {

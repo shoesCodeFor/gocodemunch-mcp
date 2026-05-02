@@ -201,11 +201,23 @@ func runWithArgs(args []string, stdout, stderr io.Writer) int {
 
 	modeArg := flags.String("mode", defaultEvalMode, "Eval mode (retrieval-eval|token-savings-smoke)")
 	fixturesDirArg := flags.String("fixtures-dir", defaultFixturesDir, "Path containing corpus.json, queries.json, and relevance.json")
+	suitePathArg := flags.String("suite-path", "", "Token-savings suite directory, or prompt_suite.json path within one")
 	providersArg := flags.String("providers", "", "Comma-separated embedding providers (ollama,vllm); defaults to EMBEDDING_PROVIDER")
 	backendsArg := flags.String("backends", "", "Comma-separated vector backends (sqlite,qdrant); defaults to VECTOR_BACKEND")
+	competitorsArg := flags.String(
+		"competitors",
+		"",
+		"Comma-separated token-savings competitors (claude_code,codex,amp); defaults to all supported competitors",
+	)
+	trendWindowArg := flags.String(
+		"trend-window",
+		defaultTokenSavingsTrendWindow,
+		"Token-savings trend history lookback (all|last_24h|last_7d|last_30d)",
+	)
 	namespacePrefixArg := flags.String("namespace-prefix", defaultNamespacePrefix, "Namespace prefix used for eval fixtures")
 	keepDataArg := flags.Bool("keep-data", false, "Keep temporary sqlite data directories when CODE_INDEX_PATH is not set")
 	outPathArg := flags.String("out", "", "Optional output file path for JSON report")
+	outputPathArg := flags.String("output-path", "", "Optional output file path alias for --out")
 	markdownReportDirArg := flags.String(
 		"markdown-report-dir",
 		defaultMarkdownReportDir,
@@ -249,14 +261,59 @@ func runWithArgs(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if mode == evalModeTokenSavings {
-		fixturesDirValue := strings.TrimSpace(*fixturesDirArg)
-		if _, ok := explicitFlags["fixtures-dir"]; !ok && fixturesDirValue == defaultFixturesDir {
-			fixturesDirValue = defaultTokenSavingsFixturesDir
+		fixturesDirRaw := strings.TrimSpace(*fixturesDirArg)
+		fixturesDirExplicit := flagWasExplicit(explicitFlags, "fixtures-dir")
+		suitePathExplicit := flagWasExplicit(explicitFlags, "suite-path")
+		if !fixturesDirExplicit && !suitePathExplicit && fixturesDirRaw == defaultFixturesDir {
+			fixturesDirRaw = defaultTokenSavingsFixturesDir
+		}
+		fixturesDirValue := fixturesDirRaw
+		if suitePathExplicit {
+			resolvedSuitePath, err := resolveTokenSavingsSuitePath(*suitePathArg)
+			if err != nil {
+				fmt.Fprintf(stderr, "resolve token savings suite path: %v\n", err)
+				return 2
+			}
+			if fixturesDirExplicit {
+				resolvedFixturesDir, err := resolveFixturesDir(fixturesDirRaw)
+				if err != nil {
+					fmt.Fprintf(stderr, "resolve fixtures dir: %v\n", err)
+					return 2
+				}
+				if resolvedFixturesDir != resolvedSuitePath {
+					fmt.Fprintf(
+						stderr,
+						"resolve token savings suite path: --fixtures-dir and --suite-path must match when both are set\n",
+					)
+					return 2
+				}
+			}
+			fixturesDirValue = resolvedSuitePath
+		} else {
+			var err error
+			fixturesDirValue, err = resolveFixturesDir(fixturesDirRaw)
+			if err != nil {
+				fmt.Fprintf(stderr, "resolve fixtures dir: %v\n", err)
+				return 2
+			}
 		}
 
-		outPathValue := strings.TrimSpace(*outPathArg)
-		if _, ok := explicitFlags["out"]; !ok && outPathValue == "" {
+		outPathValue := cleanOptionalPath(*outPathArg)
+		outPathExplicit := flagWasExplicit(explicitFlags, "out")
+		outputPathExplicit := flagWasExplicit(explicitFlags, "output-path")
+		if !outPathExplicit && !outputPathExplicit && outPathValue == "" {
 			outPathValue = defaultTokenSavingsOutputPath
+		}
+		if outputPathExplicit {
+			resolvedOutputPath := cleanOptionalPath(*outputPathArg)
+			if outPathExplicit && outPathValue != resolvedOutputPath {
+				fmt.Fprintf(
+					stderr,
+					"resolve token savings output path: --out and --output-path must match when both are set\n",
+				)
+				return 2
+			}
+			outPathValue = resolvedOutputPath
 		}
 
 		markdownReportDirValue := strings.TrimSpace(*markdownReportDirArg)
@@ -267,6 +324,17 @@ func runWithArgs(args []string, stdout, stderr io.Writer) int {
 		skipMarkdownReport := *skipMarkdownReportArg
 		if _, ok := explicitFlags["skip-markdown-report"]; !ok {
 			skipMarkdownReport = true
+		}
+
+		runOptions, err := resolveTokenSavingsRunOptions(
+			cfg,
+			*competitorsArg,
+			*trendWindowArg,
+			nowUTCFn().UTC(),
+		)
+		if err != nil {
+			fmt.Fprintf(stderr, "resolve token savings options: %v\n", err)
+			return 2
 		}
 
 		combinations, err := resolveCombinations(cfg, *providersArg, *backendsArg)
@@ -284,6 +352,7 @@ func runWithArgs(args []string, stdout, stderr io.Writer) int {
 			combinations,
 			*keepDataArg,
 			providersExplicit || backendsExplicit,
+			runOptions,
 		)
 		if runErr != nil {
 			fmt.Fprintf(stderr, "run token savings smoke: %v\n", runErr)
@@ -818,6 +887,31 @@ func resolveFixturesDir(raw string) (string, error) {
 		return "", errors.New("fixtures dir must be non-empty")
 	}
 	return filepath.Clean(trimmed), nil
+}
+
+func resolveTokenSavingsSuitePath(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", errors.New("suite path must be non-empty")
+	}
+	cleaned := filepath.Clean(trimmed)
+	if strings.EqualFold(filepath.Base(cleaned), tokenSavingsPromptSuiteFileName) {
+		return filepath.Dir(cleaned), nil
+	}
+	return cleaned, nil
+}
+
+func cleanOptionalPath(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	return filepath.Clean(trimmed)
+}
+
+func flagWasExplicit(explicitFlags map[string]struct{}, name string) bool {
+	_, ok := explicitFlags[name]
+	return ok
 }
 
 func loadEvalFixtures(dir string) (evalFixtures, error) {

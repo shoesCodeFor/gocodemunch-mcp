@@ -47,13 +47,14 @@ type SavingsBenchmarkCompetitorScore struct {
 
 // SavingsBenchmarkRunFilter narrows benchmark-history reads.
 type SavingsBenchmarkRunFilter struct {
-	Dataset      string
-	SuiteVersion string
-	Mode         string
-	Provider     string
-	Backend      string
-	Model        string
-	ExcludeRunID string
+	Dataset           string
+	SuiteVersion      string
+	Mode              string
+	Provider          string
+	Backend           string
+	Model             string
+	ExcludeRunID      string
+	CapturedAtOrAfter time.Time
 }
 
 type savingsBenchmarkRunPayload struct {
@@ -312,6 +313,10 @@ func loadSQLiteSavingsBenchmarkRuns(
 	if excluded := strings.TrimSpace(filter.ExcludeRunID); excluded != "" {
 		query += ` AND run_id <> ?`
 		args = append(args, excluded)
+	}
+	if !filter.CapturedAtOrAfter.IsZero() {
+		query += ` AND unixepoch(captured_at) >= unixepoch(?)`
+		args = append(args, filter.CapturedAtOrAfter.UTC().Format(time.RFC3339Nano))
 	}
 	query += ` ORDER BY captured_at ASC, run_id ASC`
 

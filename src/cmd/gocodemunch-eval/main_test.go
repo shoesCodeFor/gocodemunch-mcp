@@ -333,6 +333,12 @@ func TestRunWithArgsTokenSavingsSmokeEmitsSavingsReport(t *testing.T) {
 	if report.Aggregate.CaseCount != 4 {
 		t.Fatalf("expected 4 token savings cases, got %#v", report.Aggregate)
 	}
+	if !reflect.DeepEqual(report.Competitors, []string{"amp", "claude_code", "codex"}) {
+		t.Fatalf("expected default competitor set, got %#v", report.Competitors)
+	}
+	if report.TrendWindow != defaultTokenSavingsTrendWindow {
+		t.Fatalf("expected default trend window %q, got %#v", defaultTokenSavingsTrendWindow, report)
+	}
 	if report.CombinationCount != 1 || len(report.Combinations) != 1 {
 		t.Fatalf("expected one token savings combination, got %#v", report.Combinations)
 	}
@@ -509,6 +515,69 @@ func TestRunWithArgsTokenSavingsSmokeResolvesProviderBackendMatrix(t *testing.T)
 	}
 	if !reflect.DeepEqual(embedderCalls, expectedCalls) {
 		t.Fatalf("unexpected embedder init order: got %#v want %#v", embedderCalls, expectedCalls)
+	}
+}
+
+func TestRunWithArgsTokenSavingsSmokeSupportsSuiteAndOutputAliases(t *testing.T) {
+	fixturesDir := writeTokenSavingsMarkdownFixtures(t)
+
+	restore := overrideEvalRunnerHooks(
+		tokenSavingsTestLoadConfigFn(),
+		tokenSavingsTestBackendFactory,
+		tokenSavingsTestEmbedderFactory,
+		closeBackendFn,
+		func() time.Time { return time.Date(2026, time.May, 1, 9, 30, 0, 0, time.UTC) },
+	)
+	defer restore()
+
+	outPath := filepath.Join(t.TempDir(), "outputs", "token-savings-aliases.json")
+	args := []string{
+		"--mode", "token-savings-smoke",
+		"--suite-path", filepath.Join(fixturesDir, tokenSavingsPromptSuiteFileName),
+		"--output-path", outPath,
+		"--competitors", "codex,amp",
+		"--trend-window", "all",
+		"--skip-markdown-report",
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runWithArgs(args, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected success exit code 0, got %d stderr=%s", code, stderr.String())
+	}
+
+	report := tokenSavingsSmokeReport{}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("decode token savings alias report: %v output=%s", err, stdout.String())
+	}
+
+	if report.FixturesDir != fixturesDir {
+		t.Fatalf("expected suite-path alias to resolve fixture dir %q, got %#v", fixturesDir, report)
+	}
+	if !reflect.DeepEqual(report.Competitors, []string{"amp", "codex"}) {
+		t.Fatalf("expected filtered competitors, got %#v", report.Competitors)
+	}
+	if report.TrendWindow != tokenSavingsTrendWindowAll {
+		t.Fatalf("expected trend window %q, got %#v", tokenSavingsTrendWindowAll, report)
+	}
+	if _, ok := report.CompetitorPricing["claude_code"]; ok {
+		t.Fatalf("expected claude_code pricing to be excluded, got %#v", report.CompetitorPricing)
+	}
+	if len(report.Aggregate.Savings.Scores) != 2 {
+		t.Fatalf("expected two competitor scorecards after filtering, got %#v", report.Aggregate.Savings)
+	}
+	if _, ok := report.Aggregate.Savings.Scores["claude_code"]; ok {
+		t.Fatalf("expected claude_code scorecard to be excluded, got %#v", report.Aggregate.Savings)
+	}
+	if len(report.Aggregate.Trends["codex"]) != 1 || len(report.Aggregate.Trends["amp"]) != 1 {
+		t.Fatalf("expected one current-run trend point per selected competitor, got %#v", report.Aggregate.Trends)
+	}
+	if _, ok := report.Aggregate.Trends["claude_code"]; ok {
+		t.Fatalf("expected claude_code trend series to be excluded, got %#v", report.Aggregate.Trends)
+	}
+	if _, err := os.Stat(outPath); err != nil {
+		t.Fatalf("expected output-path alias to write JSON artifact: %v", err)
 	}
 }
 
@@ -920,6 +989,65 @@ func TestRunWithArgsTokenSavingsSmokePersistsBenchmarkHistoryAcrossRuns(t *testi
 	}
 	if len(runs) != 2 {
 		t.Fatalf("expected two persisted benchmark history rows after two unique runs, got %#v", runs)
+	}
+}
+
+func TestRunWithArgsTokenSavingsSmokeAppliesTrendWindowToPersistedHistory(t *testing.T) {
+	fixturesDir := writeTokenSavingsMarkdownFixtures(t)
+	storageRoot := t.TempDir()
+	currentTime := time.Date(2026, time.April, 20, 9, 30, 0, 0, time.UTC)
+
+	restore := overrideEvalRunnerHooks(
+		tokenSavingsTestLoadConfigWithStoragePath(storageRoot),
+		tokenSavingsTestBackendFactory,
+		tokenSavingsTestEmbedderFactory,
+		closeBackendFn,
+		func() time.Time { return currentTime },
+	)
+	defer restore()
+
+	baseArgs := []string{
+		"--mode", "token-savings-smoke",
+		"--fixtures-dir", fixturesDir,
+		"--out", filepath.Join(t.TempDir(), "outputs", "token-savings-trend-window.json"),
+		"--skip-markdown-report",
+	}
+
+	var stdoutRun1 bytes.Buffer
+	var stderrRun1 bytes.Buffer
+	if code := runWithArgs(baseArgs, &stdoutRun1, &stderrRun1); code != 0 {
+		t.Fatalf("expected first token savings trend-window run success, got code=%d stderr=%s", code, stderrRun1.String())
+	}
+
+	currentTime = time.Date(2026, time.April, 28, 9, 30, 0, 0, time.UTC)
+	var stdoutRun2 bytes.Buffer
+	var stderrRun2 bytes.Buffer
+	if code := runWithArgs(baseArgs, &stdoutRun2, &stderrRun2); code != 0 {
+		t.Fatalf("expected second token savings trend-window run success, got code=%d stderr=%s", code, stderrRun2.String())
+	}
+
+	currentTime = time.Date(2026, time.May, 1, 9, 30, 0, 0, time.UTC)
+	windowArgs := append(append([]string(nil), baseArgs...), "--trend-window", "last_7d")
+
+	var stdoutRun3 bytes.Buffer
+	var stderrRun3 bytes.Buffer
+	if code := runWithArgs(windowArgs, &stdoutRun3, &stderrRun3); code != 0 {
+		t.Fatalf("expected third token savings trend-window run success, got code=%d stderr=%s", code, stderrRun3.String())
+	}
+
+	reportRun3 := tokenSavingsSmokeReport{}
+	if err := json.Unmarshal(stdoutRun3.Bytes(), &reportRun3); err != nil {
+		t.Fatalf("decode trend-window token savings report: %v output=%s", err, stdoutRun3.String())
+	}
+	if reportRun3.TrendWindow != "last_7d" {
+		t.Fatalf("expected trend window last_7d, got %#v", reportRun3)
+	}
+	trends := reportRun3.Aggregate.Trends["codex"]
+	if len(trends) != 2 {
+		t.Fatalf("expected one in-window historical point plus the current point, got %#v", reportRun3.Aggregate.Trends)
+	}
+	if trends[0].CapturedAtUTC != "2026-04-28T09:30:00Z" || trends[1].CapturedAtUTC != "2026-05-01T09:30:00Z" {
+		t.Fatalf("expected last_7d window to exclude older persisted run, got %#v", trends)
 	}
 }
 

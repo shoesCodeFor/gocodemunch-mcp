@@ -1,4 +1,4 @@
-.PHONY: help build build-all build-mcp build-parity build-slo-bench test smoke vector-up vector-down vector-health vector-smoke eval-smoke eval-matrix eval-gate eval-savings-smoke bench race fmt clean
+.PHONY: help build build-all build-mcp build-parity build-slo-bench test smoke vector-up vector-down vector-health vector-smoke eval-smoke eval-matrix eval-gate eval-savings-smoke eval-savings-matrix bench race fmt clean
 
 BINDIR := bin
 MCP_BIN := $(BINDIR)/gocodemunch-mcp
@@ -18,6 +18,12 @@ EVAL_MATRIX_PROVIDERS ?= ollama,vllm
 EVAL_MATRIX_BACKENDS ?= sqlite,qdrant
 EVAL_GATE_PROVIDERS ?= $(EVAL_MATRIX_PROVIDERS)
 EVAL_GATE_BACKENDS ?= $(EVAL_MATRIX_BACKENDS)
+EVAL_SAVINGS_SMOKE_PROVIDERS ?= ollama
+EVAL_SAVINGS_SMOKE_BACKENDS ?= sqlite
+EVAL_SAVINGS_MATRIX_PROVIDERS ?= $(EVAL_MATRIX_PROVIDERS)
+EVAL_SAVINGS_MATRIX_BACKENDS ?= $(EVAL_MATRIX_BACKENDS)
+EVAL_SAVINGS_COMPETITORS ?= claude_code,codex,amp
+EVAL_SAVINGS_TREND_WINDOW ?= last_30d
 EVAL_GATE_MIN_MEAN_RECALL_AT_K ?= 0.70
 EVAL_GATE_MIN_MEAN_MRR_AT_K ?= 0.70
 EVAL_GATE_MAX_P50_LATENCY_MS ?= 5000
@@ -39,7 +45,8 @@ help:
 	@printf "  make eval-smoke     Run non-interactive eval smoke (ollama/sqlite default)\n"
 	@printf "  make eval-matrix    Run non-interactive eval matrix (ollama,vllm x sqlite,qdrant default)\n"
 	@printf "  make eval-gate      Run non-interactive eval matrix with default thresholds (0.70 recall/mrr, 5000ms p50/p95)\n"
-	@printf "  make eval-savings-smoke Run token savings smoke benchmark and write JSON output\n"
+	@printf "  make eval-savings-smoke Run token savings smoke benchmark with deterministic defaults\n"
+	@printf "  make eval-savings-matrix Run token savings benchmark matrix (ollama,vllm x sqlite,qdrant default)\n"
 	@printf "  make fmt            Run gofmt across the repo\n"
 	@printf "  make clean          Remove built binaries\n"
 	@printf "  make bench          Run benchmark script\n"
@@ -122,8 +129,24 @@ eval-savings-smoke:
 	mkdir -p "$(EVAL_OUTPUT_DIR)"
 	$(EVAL_CMD) \
 		--mode token-savings-smoke \
-		--fixtures-dir "$(EVAL_TOKEN_SAVINGS_FIXTURES_DIR)" \
-		--out "$(EVAL_OUTPUT_DIR)/token-savings-smoke.json" \
+		--suite-path "$(EVAL_TOKEN_SAVINGS_FIXTURES_DIR)" \
+		--providers "$(EVAL_SAVINGS_SMOKE_PROVIDERS)" \
+		--backends "$(EVAL_SAVINGS_SMOKE_BACKENDS)" \
+		--competitors "$(EVAL_SAVINGS_COMPETITORS)" \
+		--trend-window "$(EVAL_SAVINGS_TREND_WINDOW)" \
+		--output-path "$(EVAL_OUTPUT_DIR)/token-savings-smoke.json" \
+		--skip-markdown-report
+
+eval-savings-matrix:
+	mkdir -p "$(EVAL_OUTPUT_DIR)"
+	$(EVAL_CMD) \
+		--mode token-savings-smoke \
+		--suite-path "$(EVAL_TOKEN_SAVINGS_FIXTURES_DIR)" \
+		--providers "$(EVAL_SAVINGS_MATRIX_PROVIDERS)" \
+		--backends "$(EVAL_SAVINGS_MATRIX_BACKENDS)" \
+		--competitors "$(EVAL_SAVINGS_COMPETITORS)" \
+		--trend-window "$(EVAL_SAVINGS_TREND_WINDOW)" \
+		--output-path "$(EVAL_OUTPUT_DIR)/token-savings-matrix.json" \
 		--skip-markdown-report
 
 fmt:

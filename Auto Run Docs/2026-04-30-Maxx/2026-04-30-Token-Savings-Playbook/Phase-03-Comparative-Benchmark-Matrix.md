@@ -37,10 +37,13 @@ This phase builds the full benchmark workflow requested in discovery: a fixed pr
   - Completed on 2026-05-02: token-savings smoke runs now verify the default `Auto Run Docs/Working/evals/token-savings-smoke.json` artifact path, markdown reports link to real neighboring benchmark runs instead of a dangling dataset wiki-link, and `Eval-Index` now links back to `[[Savings-Index]]` for graph navigation.
   - Verified with `go test ./src/cmd/gocodemunch-eval -count=1`, `go test ./src/... ./tests-go -count=1`, `go vet ./src/cmd/gocodemunch-eval`, and `go vet ./src/...`.
 
-- [ ] Add command and Makefile ergonomics for repeatable benchmark runs:
+- [x] Add command and Makefile ergonomics for repeatable benchmark runs:
   - Add CLI flags for suite path, competitors, output path, and trend window selection with safe defaults.
   - Add Make targets (for example `eval-savings-smoke` and `eval-savings-matrix`) that are non-interactive and CI-friendly.
   - Keep defaults deterministic so nightly or local reruns do not require manual input.
+  - Completed on 2026-05-02: `gocodemunch-eval --mode token-savings-smoke` now accepts benchmark-friendly `--suite-path`, `--output-path`, `--competitors`, and `--trend-window` flags with deterministic defaults (`last_30d`, full competitor set, working JSON artifact path), filters persisted benchmark trends by the selected window, and supports stable competitor subsets in JSON/Markdown artifacts.
+  - Completed on 2026-05-02: the root `Makefile` now drives both `make eval-savings-smoke` and `make eval-savings-matrix` with explicit suite/provider/backend/competitor/trend-window arguments so local and CI reruns stay non-interactive and reproducible.
+  - Verified with `go test ./src/cmd/gocodemunch-eval -count=1`, `go test ./src/internal/storage -count=1`, `go vet ./src/cmd/gocodemunch-eval ./src/internal/storage`, `go test ./src/... ./tests-go -count=1`, and `make -n eval-savings-smoke eval-savings-matrix`.
 
 - [ ] Add tests and execute the full benchmark matrix:
   - Add unit tests for scorer math, trend rollups, and artifact rendering.

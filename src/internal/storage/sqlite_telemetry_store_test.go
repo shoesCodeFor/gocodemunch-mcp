@@ -1024,3 +1024,68 @@ func TestSQLiteTelemetryStoreSaveAndLoadSavingsBenchmarkRunsIdempotently(t *test
 		t.Fatalf("expected benchmark-linked snapshots to be excluded from latest runtime snapshot loads, got %v", err)
 	}
 }
+
+func TestSQLiteTelemetryStoreLoadSavingsBenchmarkRunsFiltersCapturedAtOrAfter(t *testing.T) {
+	now := time.Date(2026, 5, 3, 14, 0, 0, 0, time.UTC)
+	store, err := NewSQLiteTelemetryStoreWithOptions(t.TempDir(), SQLiteTelemetryStoreOptions{
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("create telemetry store: %v", err)
+	}
+
+	run1 := SavingsBenchmarkRun{
+		RunID:        "token-savings-20260420-140000z-suite-ollama-sqlite-model-a",
+		CapturedAt:   time.Date(2026, 4, 20, 14, 0, 0, 0, time.UTC),
+		Dataset:      "token-savings-suite",
+		SuiteVersion: "v1",
+		Mode:         "token-savings-smoke",
+		Provider:     "ollama",
+		Backend:      "sqlite",
+		Model:        "model-a",
+		IndexedRepo:  "token-savings-token-savings-suite",
+		CompetitorScores: map[string]SavingsBenchmarkCompetitorScore{
+			"codex": {TokensSaved: 30, CostSavedUSD: 0.009, SavingsPct: 0.15},
+		},
+	}
+	run2 := SavingsBenchmarkRun{
+		RunID:        "token-savings-20260428-140000z-suite-ollama-sqlite-model-a",
+		CapturedAt:   time.Date(2026, 4, 28, 14, 0, 0, 0, time.UTC),
+		Dataset:      "token-savings-suite",
+		SuiteVersion: "v1",
+		Mode:         "token-savings-smoke",
+		Provider:     "ollama",
+		Backend:      "sqlite",
+		Model:        "model-a",
+		IndexedRepo:  "token-savings-token-savings-suite",
+		CompetitorScores: map[string]SavingsBenchmarkCompetitorScore{
+			"codex": {TokensSaved: 42, CostSavedUSD: 0.0126, SavingsPct: 0.21},
+		},
+	}
+
+	if err := store.SaveSavingsBenchmarkRun(context.Background(), run1); err != nil {
+		t.Fatalf("save older benchmark run: %v", err)
+	}
+	if err := store.SaveSavingsBenchmarkRun(context.Background(), run2); err != nil {
+		t.Fatalf("save newer benchmark run: %v", err)
+	}
+
+	loaded, err := store.LoadSavingsBenchmarkRuns(context.Background(), SavingsBenchmarkRunFilter{
+		Dataset:           "token-savings-suite",
+		SuiteVersion:      "v1",
+		Mode:              "token-savings-smoke",
+		Provider:          "ollama",
+		Backend:           "sqlite",
+		Model:             "model-a",
+		CapturedAtOrAfter: time.Date(2026, 4, 24, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("load filtered benchmark runs: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected one benchmark run after captured_at filter, got %#v", loaded)
+	}
+	if loaded[0].RunID != run2.RunID {
+		t.Fatalf("expected only the newer benchmark run to remain, got %#v", loaded)
+	}
+}
