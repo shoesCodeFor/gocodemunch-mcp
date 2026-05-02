@@ -48,7 +48,7 @@ Compiled binaries are written to `./bin`:
 - `make eval-smoke` – run non-interactive eval smoke with defaults (`ollama` + `sqlite`) and write JSON to `Auto Run Docs/Working/evals/eval-smoke.json`
 - `make eval-matrix` – run non-interactive eval matrix with defaults (`ollama,vllm` x `sqlite,qdrant`) and write JSON to `Auto Run Docs/Working/evals/eval-matrix.json`
 - `make eval-gate` – run non-interactive eval matrix with default thresholds (`min_mean_recall_at_k=0.70`, `min_mean_mrr_at_k=0.70`, `max_p50_latency_ms=5000`, `max_p95_latency_ms=5000`) and write JSON to `Auto Run Docs/Working/evals/eval-gate.json`
-- `make eval-savings-smoke` – run the fixed token-savings smoke suite and write JSON to `Auto Run Docs/Working/evals/token-savings-smoke.json`
+- `make eval-savings-smoke` – run the fixed token-savings smoke suite and write JSON to `Auto Run Docs/Working/evals/token-savings-smoke.json` (the underlying `gocodemunch-eval --mode token-savings-smoke` command also accepts `--providers` and `--backends` to emit per-combination benchmark rows)
 - `make fmt` – format Go source files with `gofmt`
 - `make clean` – remove generated binaries from `bin/`
 - `make bench` – run the benchmark script

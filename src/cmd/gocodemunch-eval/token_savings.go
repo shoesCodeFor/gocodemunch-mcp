@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/config"
+	"github.com/jgravelle/gocodemunch-mcp/src/internal/domain/indexing"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/orchestration"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/savings"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/storage"
@@ -72,8 +73,20 @@ type tokenSavingsSmokeReport struct {
 	IndexedRepo       string                                     `json:"indexed_repo"`
 	FileCount         int                                        `json:"file_count"`
 	CompetitorPricing map[string]config.SavingsCompetitorPricing `json:"competitor_pricing_usd_per_mtok"`
+	CombinationCount  int                                        `json:"combination_count"`
+	Combinations      []tokenSavingsCombinationReport            `json:"combinations,omitempty"`
 	Cases             []tokenSavingsCaseReport                   `json:"cases"`
 	Aggregate         tokenSavingsAggregateReport                `json:"aggregate"`
+}
+
+type tokenSavingsCombinationReport struct {
+	Provider    string                      `json:"provider"`
+	Backend     string                      `json:"backend"`
+	Model       string                      `json:"model"`
+	IndexedRepo string                      `json:"indexed_repo"`
+	FileCount   int                         `json:"file_count"`
+	Cases       []tokenSavingsCaseReport    `json:"cases"`
+	Aggregate   tokenSavingsAggregateReport `json:"aggregate"`
 }
 
 type tokenSavingsCaseReport struct {
@@ -123,11 +136,42 @@ type tokenSavingsContextFile struct {
 	Content string `json:"content"`
 }
 
+type tokenSavingsExecutionContext struct {
+	service         *orchestration.Service
+	repoID          string
+	reportedRepoID  string
+	documentsByPath map[string]fixtureDocument
+	pricing         map[string]config.SavingsCompetitorPricing
+}
+
+type tokenSavingsModeAdapter struct {
+	name    string
+	execute func(
+		context.Context,
+		tokenSavingsExecutionContext,
+		tokenSavingsCaseFixture,
+		int,
+	) (tokenSavingsModeCaseMetrics, error)
+}
+
+var tokenSavingsModeAdapters = []tokenSavingsModeAdapter{
+	{
+		name:    tokenSavingsModeWithMCP,
+		execute: runTokenSavingsWithMCPMode,
+	},
+	{
+		name:    tokenSavingsModeWithoutMCP,
+		execute: runTokenSavingsWithoutMCPMode,
+	},
+}
+
 func runTokenSavingsSmokeMode(
 	ctx context.Context,
 	cfg config.Config,
 	fixturesDirRaw string,
+	combinations []evalCombination,
 	keepData bool,
+	useCombinationDependencies bool,
 ) (tokenSavingsSmokeReport, error) {
 	fixturesDir, err := resolveFixturesDir(fixturesDirRaw)
 	if err != nil {
@@ -139,24 +183,88 @@ func runTokenSavingsSmokeMode(
 		return tokenSavingsSmokeReport{}, err
 	}
 
-	storagePath, cleanupStorage, err := resolveStoragePath("", keepData)
-	if err != nil {
-		return tokenSavingsSmokeReport{}, fmt.Errorf("resolve benchmark storage path: %w", err)
-	}
-	defer cleanupStorage()
-
 	materializedRoot, cleanupCorpus, err := materializeTokenSavingsCorpus(fixtures.Documents)
 	if err != nil {
 		return tokenSavingsSmokeReport{}, fmt.Errorf("materialize token savings corpus: %w", err)
 	}
 	defer cleanupCorpus()
 
-	store, err := storage.NewSQLiteIndexStore(storagePath)
-	if err != nil {
-		return tokenSavingsSmokeReport{}, fmt.Errorf("create benchmark index store: %w", err)
+	pricing, _ := savings.NormalizePricing(cfg.SavingsCompetitorPricing)
+
+	documentsByPath := make(map[string]fixtureDocument, len(fixtures.Documents))
+	for _, doc := range fixtures.Documents {
+		documentsByPath[doc.Path] = doc
 	}
 
-	pricing, _ := savings.NormalizePricing(cfg.SavingsCompetitorPricing)
+	combinationReports := make([]tokenSavingsCombinationReport, 0, len(combinations))
+	for _, combo := range combinations {
+		comboCfg := cfg
+		comboCfg.EmbeddingProvider = combo.Provider
+		comboCfg.VectorBackend = combo.Backend
+
+		comboReport, err := runTokenSavingsCombination(
+			ctx,
+			comboCfg,
+			combo,
+			fixtures,
+			pricing,
+			materializedRoot,
+			documentsByPath,
+			keepData,
+			useCombinationDependencies,
+		)
+		if err != nil {
+			return tokenSavingsSmokeReport{}, fmt.Errorf(
+				"run token savings combination provider=%s backend=%s: %w",
+				combo.Provider,
+				combo.Backend,
+				err,
+			)
+		}
+		combinationReports = append(combinationReports, comboReport)
+	}
+
+	report := tokenSavingsSmokeReport{
+		GeneratedAtUTC:    nowUTCFn().Format(time.RFC3339),
+		Mode:              evalModeTokenSavings,
+		Dataset:           fixtures.Dataset,
+		SuiteVersion:      fixtures.SuiteVersion,
+		FixturesDir:       fixturesDir,
+		CompetitorPricing: pricing,
+		CombinationCount:  len(combinationReports),
+		Combinations:      combinationReports,
+	}
+	if len(combinationReports) > 0 {
+		report.IndexedRepo = combinationReports[0].IndexedRepo
+		report.FileCount = combinationReports[0].FileCount
+		report.Cases = cloneTokenSavingsCaseReports(combinationReports[0].Cases)
+		report.Aggregate = combinationReports[0].Aggregate
+	}
+	return report, nil
+}
+
+func runTokenSavingsCombination(
+	ctx context.Context,
+	cfg config.Config,
+	combo evalCombination,
+	fixtures tokenSavingsFixtureSet,
+	pricing map[string]config.SavingsCompetitorPricing,
+	materializedRoot string,
+	documentsByPath map[string]fixtureDocument,
+	keepData bool,
+	useDependencies bool,
+) (tokenSavingsCombinationReport, error) {
+	storagePath, cleanupStorage, err := resolveStoragePath("", keepData)
+	if err != nil {
+		return tokenSavingsCombinationReport{}, fmt.Errorf("resolve benchmark storage path: %w", err)
+	}
+	defer cleanupStorage()
+
+	store, err := storage.NewSQLiteIndexStore(storagePath)
+	if err != nil {
+		return tokenSavingsCombinationReport{}, fmt.Errorf("create benchmark index store: %w", err)
+	}
+
 	tracker := telemetry.NewTracker(telemetry.PricingFromSavings(pricing), nowUTCFn)
 
 	serviceCfg := cfg
@@ -164,10 +272,24 @@ func runTokenSavingsSmokeMode(
 	if serviceCfg.Disabled == nil {
 		serviceCfg.Disabled = map[string]struct{}{}
 	}
-	service := orchestration.New(serviceCfg, orchestration.Dependencies{
+
+	deps := orchestration.Dependencies{
 		IndexStore: store,
 		Telemetry:  tracker,
-	})
+	}
+	cleanupVectorDeps := func() {}
+	if useDependencies {
+		vectorBackend, embedder, cleanup, err := createTokenSavingsVectorDependencies(serviceCfg, combo)
+		if err != nil {
+			return tokenSavingsCombinationReport{}, err
+		}
+		deps.VectorBackend = vectorBackend
+		deps.Embedder = embedder
+		cleanupVectorDeps = cleanup
+	}
+	defer cleanupVectorDeps()
+
+	service := orchestration.New(serviceCfg, deps)
 
 	indexPayload := service.CallTool(ctx, "index_folder", map[string]any{
 		"path":             materializedRoot,
@@ -175,18 +297,21 @@ func runTokenSavingsSmokeMode(
 		"use_ai_summaries": false,
 	})
 	if !payloadBool(indexPayload, "success") {
-		return tokenSavingsSmokeReport{}, fmt.Errorf("index fixture corpus: %s", payloadError(indexPayload))
+		return tokenSavingsCombinationReport{}, fmt.Errorf("index fixture corpus: %s", payloadError(indexPayload))
 	}
 
 	repoID := payloadString(indexPayload, "repo")
 	if repoID == "" {
-		return tokenSavingsSmokeReport{}, errors.New("index fixture corpus: missing repo id")
+		return tokenSavingsCombinationReport{}, errors.New("index fixture corpus: missing repo id")
 	}
 	reportedRepoID := buildTokenSavingsReportRepoID(fixtures.Dataset)
 
-	documentsByPath := make(map[string]fixtureDocument, len(fixtures.Documents))
-	for _, doc := range fixtures.Documents {
-		documentsByPath[doc.Path] = doc
+	executionCtx := tokenSavingsExecutionContext{
+		service:         service,
+		repoID:          repoID,
+		reportedRepoID:  reportedRepoID,
+		documentsByPath: documentsByPath,
+		pricing:         pricing,
 	}
 
 	caseReports := make([]tokenSavingsCaseReport, 0, len(fixtures.Cases))
@@ -196,58 +321,45 @@ func runTokenSavingsSmokeMode(
 
 	for _, benchmarkCase := range fixtures.Cases {
 		enabledModes := buildTokenSavingsModeSet(benchmarkCase.Modes)
-		promptTokens := estimateSerializedTokensForReport(map[string]any{
-			"prompt": benchmarkCase.Prompt,
-		})
+		promptTokens := estimateTokenSavingsPromptTokens(benchmarkCase.Prompt)
+		modeResults := make(map[string]tokenSavingsModeCaseMetrics, len(enabledModes))
 
-		withMode := tokenSavingsModeCaseMetrics{}
-		if _, ok := enabledModes[tokenSavingsModeWithMCP]; ok {
-			toolArgs := cloneAnyMap(benchmarkCase.Arguments)
-			toolArgs["repo"] = repoID
-			response := service.CallTool(ctx, benchmarkCase.Tool, toolArgs)
-			if errMsg := payloadError(response); errMsg != "" {
-				return tokenSavingsSmokeReport{}, fmt.Errorf("run case %q via %s: %s", benchmarkCase.ID, benchmarkCase.Tool, errMsg)
+		for _, adapter := range tokenSavingsModeAdapters {
+			if _, ok := enabledModes[adapter.name]; !ok {
+				continue
 			}
+			result, err := adapter.execute(ctx, executionCtx, benchmarkCase, promptTokens)
+			if err != nil {
+				return tokenSavingsCombinationReport{}, fmt.Errorf(
+					"run case %q mode %s: %w",
+					benchmarkCase.ID,
+					adapter.name,
+					err,
+				)
+			}
+			modeResults[adapter.name] = result
+		}
 
-			withRequestTokens := estimateSerializedTokensForReport(map[string]any{
-				"name": benchmarkCase.Tool,
-				"arguments": buildTokenSavingsRequestArguments(
-					benchmarkCase.Arguments,
-					reportedRepoID,
-				),
-			})
-			withResponseTokens := estimateSerializedTokensForReport(
-				canonicalizeTokenSavingsResponsePayload(response),
+		withMode, ok := modeResults[tokenSavingsModeWithMCP]
+		if !ok {
+			return tokenSavingsCombinationReport{}, fmt.Errorf(
+				"run case %q: missing %s mode result",
+				benchmarkCase.ID,
+				tokenSavingsModeWithMCP,
 			)
-			withInputTokens := promptTokens + withRequestTokens
-			withMode = tokenSavingsModeCaseMetrics{
-				InputTokens:        withInputTokens,
-				OutputTokens:       withResponseTokens,
-				TotalTokens:        withInputTokens + withResponseTokens,
-				ToolRequestTokens:  withRequestTokens,
-				ToolResponseTokens: withResponseTokens,
-				CostUSD:            savings.CostsForTokens(pricing, withInputTokens, withResponseTokens),
-			}
-			totalWithInput += withMode.InputTokens
-			totalWithOutput += withMode.OutputTokens
+		}
+		withoutMode, ok := modeResults[tokenSavingsModeWithoutMCP]
+		if !ok {
+			return tokenSavingsCombinationReport{}, fmt.Errorf(
+				"run case %q: missing %s mode result",
+				benchmarkCase.ID,
+				tokenSavingsModeWithoutMCP,
+			)
 		}
 
-		withoutMode := tokenSavingsModeCaseMetrics{}
-		if _, ok := enabledModes[tokenSavingsModeWithoutMCP]; ok {
-			contextPayload := buildWithoutMCPInputPayload(benchmarkCase.Prompt, benchmarkCase.ContextFiles, documentsByPath)
-			contextOnlyTokens := estimateSerializedTokensForReport(map[string]any{
-				"context_files": contextPayload["context_files"],
-			})
-			withoutInputTokens := estimateSerializedTokensForReport(contextPayload)
-			withoutMode = tokenSavingsModeCaseMetrics{
-				InputTokens:   withoutInputTokens,
-				OutputTokens:  0,
-				TotalTokens:   withoutInputTokens,
-				ContextTokens: contextOnlyTokens,
-				CostUSD:       savings.CostsForTokens(pricing, withoutInputTokens, 0),
-			}
-			totalWithoutInput += withoutMode.InputTokens
-		}
+		totalWithInput += withMode.InputTokens
+		totalWithOutput += withMode.OutputTokens
+		totalWithoutInput += withoutMode.InputTokens
 
 		savingsReport := tokenSavingsDeltaReport{
 			TokensSaved:  withoutMode.TotalTokens - withMode.TotalTokens,
@@ -281,16 +393,13 @@ func runTokenSavingsSmokeMode(
 		CostUSD:      savings.CostsForTokens(pricing, totalWithoutInput, 0),
 	}
 
-	return tokenSavingsSmokeReport{
-		GeneratedAtUTC:    nowUTCFn().Format(time.RFC3339),
-		Mode:              evalModeTokenSavings,
-		Dataset:           fixtures.Dataset,
-		SuiteVersion:      fixtures.SuiteVersion,
-		FixturesDir:       fixturesDir,
-		IndexedRepo:       reportedRepoID,
-		FileCount:         len(fixtures.Documents),
-		CompetitorPricing: pricing,
-		Cases:             caseReports,
+	return tokenSavingsCombinationReport{
+		Provider:    combo.Provider,
+		Backend:     combo.Backend,
+		Model:       configuredEmbeddingModel(cfg, combo.Provider),
+		IndexedRepo: reportedRepoID,
+		FileCount:   len(fixtures.Documents),
+		Cases:       caseReports,
 		Aggregate: tokenSavingsAggregateReport{
 			CaseCount:  len(caseReports),
 			WithMCP:    aggregateWith,
@@ -301,6 +410,84 @@ func runTokenSavingsSmokeMode(
 				CostSavedUSD: savings.DiffCostMap(aggregateWithout.CostUSD, aggregateWith.CostUSD, pricing),
 			},
 		},
+	}, nil
+}
+
+func createTokenSavingsVectorDependencies(
+	cfg config.Config,
+	combo evalCombination,
+) (indexing.VectorBackend, indexing.Embedder, func(), error) {
+	vectorBackend, err := createBackendFn(cfg, combo.Backend)
+	if err != nil {
+		return nil, nil, func() {}, fmt.Errorf("initialize vector backend: %w", err)
+	}
+
+	cleanup := func() {
+		_ = closeBackendFn(vectorBackend)
+	}
+
+	embedder, err := createEmbedderFn(cfg, combo.Provider)
+	if err != nil {
+		cleanup()
+		return nil, nil, func() {}, fmt.Errorf("initialize embedder: %w", err)
+	}
+
+	return vectorBackend, embedder, cleanup, nil
+}
+
+func runTokenSavingsWithMCPMode(
+	ctx context.Context,
+	executionCtx tokenSavingsExecutionContext,
+	benchmarkCase tokenSavingsCaseFixture,
+	promptTokens int,
+) (tokenSavingsModeCaseMetrics, error) {
+	toolArgs := cloneAnyMap(benchmarkCase.Arguments)
+	toolArgs["repo"] = executionCtx.repoID
+	response := executionCtx.service.CallTool(ctx, benchmarkCase.Tool, toolArgs)
+	if errMsg := payloadError(response); errMsg != "" {
+		return tokenSavingsModeCaseMetrics{}, fmt.Errorf("run tool %s: %s", benchmarkCase.Tool, errMsg)
+	}
+
+	requestTokens := estimateSerializedTokensForReport(map[string]any{
+		"name": benchmarkCase.Tool,
+		"arguments": buildTokenSavingsRequestArguments(
+			benchmarkCase.Arguments,
+			executionCtx.reportedRepoID,
+		),
+	})
+	responseTokens := estimateSerializedTokensForReport(
+		canonicalizeTokenSavingsResponsePayload(response),
+	)
+	inputTokens := promptTokens + requestTokens
+
+	return tokenSavingsModeCaseMetrics{
+		InputTokens:        inputTokens,
+		OutputTokens:       responseTokens,
+		TotalTokens:        inputTokens + responseTokens,
+		ToolRequestTokens:  requestTokens,
+		ToolResponseTokens: responseTokens,
+		CostUSD:            savings.CostsForTokens(executionCtx.pricing, inputTokens, responseTokens),
+	}, nil
+}
+
+func runTokenSavingsWithoutMCPMode(
+	_ context.Context,
+	executionCtx tokenSavingsExecutionContext,
+	benchmarkCase tokenSavingsCaseFixture,
+	promptTokens int,
+) (tokenSavingsModeCaseMetrics, error) {
+	contextFiles := buildWithoutMCPContextFiles(benchmarkCase.ContextFiles, executionCtx.documentsByPath)
+	contextTokens := estimateSerializedTokensForReport(map[string]any{
+		"context_files": contextFiles,
+	})
+	inputTokens := promptTokens + contextTokens
+
+	return tokenSavingsModeCaseMetrics{
+		InputTokens:   inputTokens,
+		OutputTokens:  0,
+		TotalTokens:   inputTokens,
+		ContextTokens: contextTokens,
+		CostUSD:       savings.CostsForTokens(executionCtx.pricing, inputTokens, 0),
 	}, nil
 }
 
@@ -504,11 +691,10 @@ func normalizeFixtureRelativePath(raw string) (string, error) {
 	}
 }
 
-func buildWithoutMCPInputPayload(
-	prompt string,
+func buildWithoutMCPContextFiles(
 	contextFiles []string,
 	documentsByPath map[string]fixtureDocument,
-) map[string]any {
+) []tokenSavingsContextFile {
 	context := make([]tokenSavingsContextFile, 0, len(contextFiles))
 	for _, path := range contextFiles {
 		doc := documentsByPath[path]
@@ -517,10 +703,13 @@ func buildWithoutMCPInputPayload(
 			Content: doc.Text,
 		})
 	}
-	return map[string]any{
-		"prompt":        prompt,
-		"context_files": context,
-	}
+	return context
+}
+
+func estimateTokenSavingsPromptTokens(prompt string) int {
+	return estimateSerializedTokensForReport(map[string]any{
+		"prompt": prompt,
+	})
 }
 
 func estimateSerializedTokensForReport(value any) int {
@@ -561,6 +750,36 @@ func payloadString(payload map[string]any, key string) string {
 
 func payloadError(payload map[string]any) string {
 	return payloadString(payload, "error")
+}
+
+func cloneTokenSavingsCaseReports(input []tokenSavingsCaseReport) []tokenSavingsCaseReport {
+	if len(input) == 0 {
+		return nil
+	}
+
+	cloned := make([]tokenSavingsCaseReport, 0, len(input))
+	for _, row := range input {
+		rowCopy := row
+		rowCopy.Modes = append([]string(nil), row.Modes...)
+		rowCopy.ToolArguments = cloneAnyMap(row.ToolArguments)
+		rowCopy.ContextFiles = append([]string(nil), row.ContextFiles...)
+		rowCopy.WithMCP.CostUSD = cloneFloatMap(row.WithMCP.CostUSD)
+		rowCopy.WithoutMCP.CostUSD = cloneFloatMap(row.WithoutMCP.CostUSD)
+		rowCopy.Savings.CostSavedUSD = cloneFloatMap(row.Savings.CostSavedUSD)
+		cloned = append(cloned, rowCopy)
+	}
+	return cloned
+}
+
+func cloneFloatMap(input map[string]float64) map[string]float64 {
+	if len(input) == 0 {
+		return map[string]float64{}
+	}
+	cloned := make(map[string]float64, len(input))
+	for key, value := range input {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func writeTokenSavingsMarkdownRunReport(
@@ -608,6 +827,7 @@ func renderTokenSavingsMarkdownRunReport(report tokenSavingsSmokeReport, jsonOut
 	tags := collectTokenSavingsMarkdownTags(report)
 	relatedLinks := collectTokenSavingsMarkdownRelatedLinks(jsonOutPath)
 	competitors := orderedTokenSavingsCompetitors(report.CompetitorPricing)
+	combinations := tokenSavingsReportCombinations(report)
 
 	var b strings.Builder
 	b.WriteString("---\n")
@@ -630,29 +850,42 @@ func renderTokenSavingsMarkdownRunReport(report tokenSavingsSmokeReport, jsonOut
 	b.WriteString(fmt.Sprintf("- Dataset: `%s`\n", report.Dataset))
 	b.WriteString(fmt.Sprintf("- Suite Version: `%s`\n", report.SuiteVersion))
 	b.WriteString(fmt.Sprintf("- Fixtures Dir: `%s`\n", report.FixturesDir))
-	b.WriteString(fmt.Sprintf("- Indexed Repo: `%s`\n", report.IndexedRepo))
-	b.WriteString(fmt.Sprintf("- File Count: `%d`\n", report.FileCount))
+	b.WriteString(fmt.Sprintf("- Combination Count: `%d`\n", len(combinations)))
 	if outPath := strings.TrimSpace(jsonOutPath); outPath != "" {
 		b.WriteString(fmt.Sprintf("- JSON Artifact: `%s`\n", outPath))
 	}
-	b.WriteString(fmt.Sprintf("- Tokens Saved: `%d`\n", report.Aggregate.Savings.TokensSaved))
-	b.WriteString(fmt.Sprintf("- Savings Percentage: `%s`\n", formatSavingsPctForMarkdown(report.Aggregate.Savings.SavingsPct)))
+	if len(combinations) == 1 {
+		combo := combinations[0]
+		if combo.Provider != "" {
+			b.WriteString(fmt.Sprintf("- Provider: `%s`\n", combo.Provider))
+		}
+		if combo.Backend != "" {
+			b.WriteString(fmt.Sprintf("- Backend: `%s`\n", combo.Backend))
+		}
+		if combo.Model != "" {
+			b.WriteString(fmt.Sprintf("- Model: `%s`\n", combo.Model))
+		}
+		b.WriteString(fmt.Sprintf("- Indexed Repo: `%s`\n", combo.IndexedRepo))
+		b.WriteString(fmt.Sprintf("- File Count: `%d`\n", combo.FileCount))
+		b.WriteString(fmt.Sprintf("- Tokens Saved: `%d`\n", combo.Aggregate.Savings.TokensSaved))
+		b.WriteString(fmt.Sprintf("- Savings Percentage: `%s`\n", formatSavingsPctForMarkdown(combo.Aggregate.Savings.SavingsPct)))
+	}
 
-	b.WriteString("\n## Aggregate Tokens\n\n")
-	b.WriteString("| Mode | Input Tokens | Output Tokens | Total Tokens |\n")
-	b.WriteString("| --- | ---: | ---: | ---: |\n")
-	b.WriteString(fmt.Sprintf(
-		"| with_mcp | %d | %d | %d |\n",
-		report.Aggregate.WithMCP.InputTokens,
-		report.Aggregate.WithMCP.OutputTokens,
-		report.Aggregate.WithMCP.TotalTokens,
-	))
-	b.WriteString(fmt.Sprintf(
-		"| without_mcp | %d | %d | %d |\n",
-		report.Aggregate.WithoutMCP.InputTokens,
-		report.Aggregate.WithoutMCP.OutputTokens,
-		report.Aggregate.WithoutMCP.TotalTokens,
-	))
+	b.WriteString("\n## Combination Summary\n\n")
+	b.WriteString("| Provider | Backend | Model | Indexed Repo | File Count | Tokens Saved | Savings % |\n")
+	b.WriteString("| --- | --- | --- | --- | ---: | ---: | ---: |\n")
+	for _, combo := range combinations {
+		b.WriteString(fmt.Sprintf(
+			"| %s | %s | %s | %s | %d | %d | %s |\n",
+			tokenSavingsMarkdownValue(combo.Provider),
+			tokenSavingsMarkdownValue(combo.Backend),
+			tokenSavingsMarkdownValue(combo.Model),
+			tokenSavingsMarkdownValue(combo.IndexedRepo),
+			combo.FileCount,
+			combo.Aggregate.Savings.TokensSaved,
+			formatSavingsPctForMarkdown(combo.Aggregate.Savings.SavingsPct),
+		))
+	}
 
 	if len(competitors) > 0 {
 		b.WriteString("\n## Competitor Pricing\n\n")
@@ -667,34 +900,69 @@ func renderTokenSavingsMarkdownRunReport(report tokenSavingsSmokeReport, jsonOut
 				rate.OutputUSDPerMTok,
 			))
 		}
-
-		b.WriteString("\n## Aggregate Cost Savings\n\n")
-		b.WriteString("| Competitor | With MCP Cost (USD) | Without MCP Cost (USD) | Cost Saved (USD) |\n")
-		b.WriteString("| --- | ---: | ---: | ---: |\n")
-		for _, competitor := range competitors {
-			b.WriteString(fmt.Sprintf(
-				"| %s | %s | %s | %s |\n",
-				competitor,
-				formatUSDForMarkdown(report.Aggregate.WithMCP.CostUSD[competitor]),
-				formatUSDForMarkdown(report.Aggregate.WithoutMCP.CostUSD[competitor]),
-				formatUSDForMarkdown(report.Aggregate.Savings.CostSavedUSD[competitor]),
-			))
-		}
 	}
 
-	b.WriteString("\n## Per-Case Savings\n\n")
-	b.WriteString("| Case | Tool | With MCP Tokens | Without MCP Tokens | Tokens Saved | Savings % |\n")
-	b.WriteString("| --- | --- | ---: | ---: | ---: | ---: |\n")
-	for _, row := range report.Cases {
+	b.WriteString("\n## Combination Details\n")
+	for _, combo := range combinations {
+		b.WriteString("\n")
 		b.WriteString(fmt.Sprintf(
-			"| %s | %s | %d | %d | %d | %s |\n",
-			row.ID,
-			row.Tool,
-			row.WithMCP.TotalTokens,
-			row.WithoutMCP.TotalTokens,
-			row.Savings.TokensSaved,
-			formatSavingsPctForMarkdown(row.Savings.SavingsPct),
+			"### %s / %s\n\n",
+			tokenSavingsMarkdownValue(combo.Provider),
+			tokenSavingsMarkdownValue(combo.Backend),
 		))
+		if combo.Model != "" {
+			b.WriteString(fmt.Sprintf("- Model: `%s`\n", combo.Model))
+		}
+		b.WriteString(fmt.Sprintf("- Indexed Repo: `%s`\n", combo.IndexedRepo))
+		b.WriteString(fmt.Sprintf("- File Count: `%d`\n", combo.FileCount))
+		b.WriteString(fmt.Sprintf("- Tokens Saved: `%d`\n", combo.Aggregate.Savings.TokensSaved))
+		b.WriteString(fmt.Sprintf("- Savings Percentage: `%s`\n", formatSavingsPctForMarkdown(combo.Aggregate.Savings.SavingsPct)))
+
+		b.WriteString("\n#### Aggregate Tokens\n\n")
+		b.WriteString("| Mode | Input Tokens | Output Tokens | Total Tokens |\n")
+		b.WriteString("| --- | ---: | ---: | ---: |\n")
+		b.WriteString(fmt.Sprintf(
+			"| with_mcp | %d | %d | %d |\n",
+			combo.Aggregate.WithMCP.InputTokens,
+			combo.Aggregate.WithMCP.OutputTokens,
+			combo.Aggregate.WithMCP.TotalTokens,
+		))
+		b.WriteString(fmt.Sprintf(
+			"| without_mcp | %d | %d | %d |\n",
+			combo.Aggregate.WithoutMCP.InputTokens,
+			combo.Aggregate.WithoutMCP.OutputTokens,
+			combo.Aggregate.WithoutMCP.TotalTokens,
+		))
+
+		if len(competitors) > 0 {
+			b.WriteString("\n#### Aggregate Cost Savings\n\n")
+			b.WriteString("| Competitor | With MCP Cost (USD) | Without MCP Cost (USD) | Cost Saved (USD) |\n")
+			b.WriteString("| --- | ---: | ---: | ---: |\n")
+			for _, competitor := range competitors {
+				b.WriteString(fmt.Sprintf(
+					"| %s | %s | %s | %s |\n",
+					competitor,
+					formatUSDForMarkdown(combo.Aggregate.WithMCP.CostUSD[competitor]),
+					formatUSDForMarkdown(combo.Aggregate.WithoutMCP.CostUSD[competitor]),
+					formatUSDForMarkdown(combo.Aggregate.Savings.CostSavedUSD[competitor]),
+				))
+			}
+		}
+
+		b.WriteString("\n#### Per-Case Savings\n\n")
+		b.WriteString("| Case | Tool | With MCP Tokens | Without MCP Tokens | Tokens Saved | Savings % |\n")
+		b.WriteString("| --- | --- | ---: | ---: | ---: | ---: |\n")
+		for _, row := range combo.Cases {
+			b.WriteString(fmt.Sprintf(
+				"| %s | %s | %d | %d | %d | %s |\n",
+				row.ID,
+				row.Tool,
+				row.WithMCP.TotalTokens,
+				row.WithoutMCP.TotalTokens,
+				row.Savings.TokensSaved,
+				formatSavingsPctForMarkdown(row.Savings.SavingsPct),
+			))
+		}
 	}
 
 	return b.String()
@@ -749,6 +1017,17 @@ func collectTokenSavingsMarkdownTags(report tokenSavingsSmokeReport) []string {
 			tagSet["competitor-"+normalized] = struct{}{}
 		}
 	}
+	for _, combo := range tokenSavingsReportCombinations(report) {
+		if provider := sanitizeTagValue(combo.Provider); provider != "" {
+			tagSet["provider-"+provider] = struct{}{}
+		}
+		if backend := sanitizeTagValue(combo.Backend); backend != "" {
+			tagSet["backend-"+backend] = struct{}{}
+		}
+		if model := sanitizeTagValue(combo.Model); model != "" {
+			tagSet["model-"+model] = struct{}{}
+		}
+	}
 
 	tags := make([]string, 0, len(tagSet))
 	for tag := range tagSet {
@@ -783,6 +1062,28 @@ func orderedTokenSavingsCompetitors(
 	pricing map[string]config.SavingsCompetitorPricing,
 ) []string {
 	return savings.OrderedCompetitors(pricing)
+}
+
+func tokenSavingsReportCombinations(report tokenSavingsSmokeReport) []tokenSavingsCombinationReport {
+	if len(report.Combinations) > 0 {
+		return report.Combinations
+	}
+	return []tokenSavingsCombinationReport{
+		{
+			IndexedRepo: report.IndexedRepo,
+			FileCount:   report.FileCount,
+			Cases:       cloneTokenSavingsCaseReports(report.Cases),
+			Aggregate:   report.Aggregate,
+		},
+	}
+}
+
+func tokenSavingsMarkdownValue(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "-"
+	}
+	return trimmed
 }
 
 func formatSavingsPctForMarkdown(value float64) string {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -284,8 +285,10 @@ func TestRunWithArgsTokenSavingsSmokeEmitsSavingsReport(t *testing.T) {
 	restore := overrideEvalRunnerHooks(
 		func() (config.Config, error) {
 			return config.Config{
-				StoragePath: t.TempDir(),
-				Disabled:    map[string]struct{}{},
+				StoragePath:    t.TempDir(),
+				Disabled:       map[string]struct{}{},
+				EmbeddingModel: "token-savings-test-model",
+				VLLMModel:      "token-savings-vllm-model",
 				SavingsCompetitorPricing: map[string]config.SavingsCompetitorPricing{
 					"claude_code": {InputUSDPerMTok: 3.0, OutputUSDPerMTok: 15.0},
 					"codex":       {InputUSDPerMTok: 1.5, OutputUSDPerMTok: 6.0},
@@ -293,8 +296,8 @@ func TestRunWithArgsTokenSavingsSmokeEmitsSavingsReport(t *testing.T) {
 				},
 			}, nil
 		},
-		createBackendFn,
-		createEmbedderFn,
+		tokenSavingsTestBackendFactory,
+		tokenSavingsTestEmbedderFactory,
 		closeBackendFn,
 		func() time.Time { return time.Date(2026, time.May, 1, 9, 30, 0, 0, time.UTC) },
 	)
@@ -329,6 +332,9 @@ func TestRunWithArgsTokenSavingsSmokeEmitsSavingsReport(t *testing.T) {
 	if report.Aggregate.CaseCount != 4 {
 		t.Fatalf("expected 4 token savings cases, got %#v", report.Aggregate)
 	}
+	if report.CombinationCount != 1 || len(report.Combinations) != 1 {
+		t.Fatalf("expected one token savings combination, got %#v", report.Combinations)
+	}
 	if len(report.Cases) != 4 {
 		t.Fatalf("expected 4 token savings case rows, got %#v", report.Cases)
 	}
@@ -349,6 +355,17 @@ func TestRunWithArgsTokenSavingsSmokeEmitsSavingsReport(t *testing.T) {
 		if _, ok := report.Aggregate.Savings.CostSavedUSD[competitor]; !ok {
 			t.Fatalf("expected %s in aggregate savings cost map: %#v", competitor, report.Aggregate.Savings)
 		}
+	}
+
+	combo := report.Combinations[0]
+	if combo.Provider != "ollama" || combo.Backend != "sqlite" || combo.Model != "token-savings-test-model" {
+		t.Fatalf("unexpected token savings combination identity: %#v", combo)
+	}
+	if combo.IndexedRepo != report.IndexedRepo {
+		t.Fatalf("expected top-level indexed repo to mirror first combination, report=%#v combo=%#v", report, combo)
+	}
+	if !reflect.DeepEqual(combo.Aggregate, report.Aggregate) {
+		t.Fatalf("expected top-level aggregate to mirror first combination, report=%#v combo=%#v", report.Aggregate, combo.Aggregate)
 	}
 
 	for _, row := range report.Cases {
@@ -376,13 +393,107 @@ func TestRunWithArgsTokenSavingsSmokeEmitsSavingsReport(t *testing.T) {
 	}
 }
 
+func TestRunWithArgsTokenSavingsSmokeResolvesProviderBackendMatrix(t *testing.T) {
+	fixturesDir := writeTokenSavingsMarkdownFixtures(t)
+
+	backendCalls := make([]string, 0, 4)
+	embedderCalls := make([]string, 0, 4)
+	restore := overrideEvalRunnerHooks(
+		tokenSavingsTestLoadConfigFn(),
+		func(cfg config.Config, backend string) (indexing.VectorBackend, error) {
+			backendCalls = append(backendCalls, cfg.EmbeddingProvider+"/"+backend)
+			return tokenSavingsTestBackendFactory(cfg, backend)
+		},
+		func(cfg config.Config, provider string) (indexing.Embedder, error) {
+			embedderCalls = append(embedderCalls, provider+"/"+cfg.VectorBackend)
+			return tokenSavingsTestEmbedderFactory(cfg, provider)
+		},
+		closeBackendFn,
+		func() time.Time { return time.Date(2026, time.May, 1, 9, 30, 0, 0, time.UTC) },
+	)
+	defer restore()
+
+	outPath := filepath.Join(t.TempDir(), "outputs", "token-savings-matrix.json")
+	args := []string{
+		"--mode", "token-savings-smoke",
+		"--fixtures-dir", fixturesDir,
+		"--providers", "ollama,vllm",
+		"--backends", "sqlite,qdrant",
+		"--out", outPath,
+		"--skip-markdown-report",
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runWithArgs(args, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected success exit code 0, got %d stderr=%s", code, stderr.String())
+	}
+
+	report := tokenSavingsSmokeReport{}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("decode token savings matrix report: %v output=%s", err, stdout.String())
+	}
+
+	if report.CombinationCount != 4 || len(report.Combinations) != 4 {
+		t.Fatalf("expected 4 token savings combinations, got %#v", report.Combinations)
+	}
+
+	expectedCombos := []struct {
+		provider string
+		backend  string
+		model    string
+	}{
+		{provider: "ollama", backend: "sqlite", model: "token-savings-test-model"},
+		{provider: "ollama", backend: "qdrant", model: "token-savings-test-model"},
+		{provider: "vllm", backend: "sqlite", model: "token-savings-vllm-model"},
+		{provider: "vllm", backend: "qdrant", model: "token-savings-vllm-model"},
+	}
+	for index, expected := range expectedCombos {
+		combo := report.Combinations[index]
+		if combo.Provider != expected.provider || combo.Backend != expected.backend || combo.Model != expected.model {
+			t.Fatalf("unexpected combination at index %d: %#v", index, combo)
+		}
+		if combo.Aggregate.CaseCount != 1 {
+			t.Fatalf("expected one case in combo %d aggregate, got %#v", index, combo.Aggregate)
+		}
+		if combo.Aggregate.WithMCP.TotalTokens <= 0 || combo.Aggregate.WithoutMCP.TotalTokens <= 0 {
+			t.Fatalf("expected both modes to record token totals for combo %d: %#v", index, combo.Aggregate)
+		}
+		for _, competitor := range []string{"claude_code", "codex", "amp"} {
+			if _, ok := combo.Aggregate.WithMCP.CostUSD[competitor]; !ok {
+				t.Fatalf("expected %s in with_mcp cost map for combo %d: %#v", competitor, index, combo.Aggregate.WithMCP)
+			}
+			if _, ok := combo.Aggregate.WithoutMCP.CostUSD[competitor]; !ok {
+				t.Fatalf("expected %s in without_mcp cost map for combo %d: %#v", competitor, index, combo.Aggregate.WithoutMCP)
+			}
+			if _, ok := combo.Aggregate.Savings.CostSavedUSD[competitor]; !ok {
+				t.Fatalf("expected %s in savings cost map for combo %d: %#v", competitor, index, combo.Aggregate.Savings)
+			}
+		}
+	}
+
+	expectedCalls := []string{
+		"ollama/sqlite",
+		"ollama/qdrant",
+		"vllm/sqlite",
+		"vllm/qdrant",
+	}
+	if !reflect.DeepEqual(backendCalls, expectedCalls) {
+		t.Fatalf("unexpected vector backend init order: got %#v want %#v", backendCalls, expectedCalls)
+	}
+	if !reflect.DeepEqual(embedderCalls, expectedCalls) {
+		t.Fatalf("unexpected embedder init order: got %#v want %#v", embedderCalls, expectedCalls)
+	}
+}
+
 func TestRunWithArgsTokenSavingsSmokeWritesMarkdownReportWithFrontMatter(t *testing.T) {
 	fixturesDir := writeTokenSavingsMarkdownFixtures(t)
 
 	restore := overrideEvalRunnerHooks(
 		tokenSavingsTestLoadConfigFn(),
-		createBackendFn,
-		createEmbedderFn,
+		tokenSavingsTestBackendFactory,
+		tokenSavingsTestEmbedderFactory,
 		closeBackendFn,
 		func() time.Time { return time.Date(2026, time.May, 1, 9, 30, 0, 0, time.UTC) },
 	)
@@ -427,14 +538,19 @@ func TestRunWithArgsTokenSavingsSmokeWritesMarkdownReportWithFrontMatter(t *test
 		"type: report",
 		"title: Token Savings Run token-savings-markdown-test 2026-05-01T09:30:00Z",
 		"created: 2026-05-01",
+		"- backend-sqlite",
 		"- competitor-amp",
 		"- competitor-claude-code",
 		"- competitor-codex",
+		"- model-token-savings-test-model",
+		"- provider-ollama",
 		"- '[[Eval-Index]]'",
 		"- '[[Savings-Index]]'",
 		"- '[[token-savings-smoke]]'",
 		"- JSON Artifact: `" + outPath + "`",
 		"- Indexed Repo: `token-savings-token-savings-markdown-test`",
+		"| ollama | sqlite | token-savings-test-model |",
+		"### ollama / sqlite",
 		"| with_mcp |",
 		"| claude_code |",
 		"| search-timeout-default | search_text |",
@@ -518,8 +634,8 @@ func TestRunWithArgsTokenSavingsSmokeReportOutputDeterminism(t *testing.T) {
 
 	restore := overrideEvalRunnerHooks(
 		tokenSavingsTestLoadConfigFn(),
-		createBackendFn,
-		createEmbedderFn,
+		tokenSavingsTestBackendFactory,
+		tokenSavingsTestEmbedderFactory,
 		closeBackendFn,
 		func() time.Time { return time.Date(2026, time.May, 1, 9, 30, 0, 0, time.UTC) },
 	)
@@ -1347,7 +1463,9 @@ func writeTokenSavingsMarkdownFixtures(t *testing.T) string {
 func tokenSavingsTestLoadConfigFn() func() (config.Config, error) {
 	return func() (config.Config, error) {
 		return config.Config{
-			Disabled: map[string]struct{}{},
+			Disabled:       map[string]struct{}{},
+			EmbeddingModel: "token-savings-test-model",
+			VLLMModel:      "token-savings-vllm-model",
 			SavingsCompetitorPricing: map[string]config.SavingsCompetitorPricing{
 				"claude_code": {InputUSDPerMTok: 3.0, OutputUSDPerMTok: 15.0},
 				"codex":       {InputUSDPerMTok: 1.5, OutputUSDPerMTok: 6.0},
@@ -1355,6 +1473,14 @@ func tokenSavingsTestLoadConfigFn() func() (config.Config, error) {
 			},
 		}, nil
 	}
+}
+
+func tokenSavingsTestBackendFactory(config.Config, string) (indexing.VectorBackend, error) {
+	return &scriptedVectorBackend{}, nil
+}
+
+func tokenSavingsTestEmbedderFactory(config.Config, string) (indexing.Embedder, error) {
+	return staticEmbedder{}, nil
 }
 
 func setEvalRunnerIntegrationEnv(t *testing.T, ollamaBaseURL string, storagePath string) {
@@ -1555,6 +1681,7 @@ func (b *scriptedVectorBackend) Query(
 		for _, record := range namespaceRecords {
 			plan = append(plan, record.Metadata.ChunkID)
 		}
+		sort.Strings(plan)
 	}
 
 	matches := make([]indexing.VectorQueryMatch, 0, min(request.TopK, len(plan)))

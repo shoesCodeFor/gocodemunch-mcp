@@ -10,10 +10,11 @@ This phase builds the full benchmark workflow requested in discovery: a fixed pr
   - Include explicit mode metadata per case so each prompt runs in both `with_mcp` and `without_mcp` paths automatically.
   - Completed on 2026-05-01: the checked-in `token-savings-smoke` prompt suite now declares deterministic per-case `modes`, fixture loading validates and canonicalizes the metadata, and token-savings reports retain the explicit mode list for each benchmark case.
 
-- [ ] Implement benchmark runner adapters for `with_mcp` and `without_mcp` execution:
+- [x] Implement benchmark runner adapters for `with_mcp` and `without_mcp` execution:
   - Reuse existing eval matrix orchestration loops for provider/backend combinations to avoid duplicate runner logic.
   - Add mode adapters that estimate token usage consistently for both paths and keep input prompts identical.
   - Ensure competitor comparisons are emitted for `claude_code`, `codex`, and `amp` in every run.
+  - Completed on 2026-05-01: token-savings evals now resolve the same provider/backend matrix used by retrieval evals, run explicit `with_mcp` and `without_mcp` adapters per case, emit per-combination benchmark sections in JSON/Markdown reports, and cover the matrix path with new `gocodemunch-eval` tests while preserving the existing single-combo smoke summary.
 
 - [ ] Add scoring and trend aggregation for token/cost deltas:
   - Compute per-prompt and aggregate deltas (`tokens_saved`, `cost_saved`, `savings_pct`) per competitor.

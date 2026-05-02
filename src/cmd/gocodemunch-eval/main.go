@@ -269,11 +269,21 @@ func runWithArgs(args []string, stdout, stderr io.Writer) int {
 			skipMarkdownReport = true
 		}
 
+		combinations, err := resolveCombinations(cfg, *providersArg, *backendsArg)
+		if err != nil {
+			fmt.Fprintf(stderr, "resolve token savings matrix: %v\n", err)
+			return 2
+		}
+		_, providersExplicit := explicitFlags["providers"]
+		_, backendsExplicit := explicitFlags["backends"]
+
 		report, runErr := runTokenSavingsSmokeMode(
 			context.Background(),
 			cfg,
 			fixturesDirValue,
+			combinations,
 			*keepDataArg,
+			providersExplicit || backendsExplicit,
 		)
 		if runErr != nil {
 			fmt.Fprintf(stderr, "run token savings smoke: %v\n", runErr)
