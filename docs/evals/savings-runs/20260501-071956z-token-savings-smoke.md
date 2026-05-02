@@ -12,9 +12,9 @@ tags:
   - suite-v1
   - token-savings
 related:
+  - '[[20260501-071027z-token-savings-smoke]]'
   - '[[Eval-Index]]'
   - '[[Savings-Index]]'
-  - '[[token-savings-smoke]]'
 ---
 
 ## Summary

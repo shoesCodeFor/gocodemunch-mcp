@@ -512,6 +512,51 @@ func TestRunWithArgsTokenSavingsSmokeResolvesProviderBackendMatrix(t *testing.T)
 	}
 }
 
+func TestRunWithArgsTokenSavingsSmokeWritesDefaultWorkingJSONArtifact(t *testing.T) {
+	fixturesDir := writeTokenSavingsMarkdownFixtures(t)
+	runRoot := t.TempDir()
+	t.Chdir(runRoot)
+
+	restore := overrideEvalRunnerHooks(
+		tokenSavingsTestLoadConfigFn(),
+		tokenSavingsTestBackendFactory,
+		tokenSavingsTestEmbedderFactory,
+		closeBackendFn,
+		func() time.Time { return time.Date(2026, time.May, 1, 9, 30, 0, 0, time.UTC) },
+	)
+	defer restore()
+
+	args := []string{
+		"--mode", "token-savings-smoke",
+		"--fixtures-dir", fixturesDir,
+		"--skip-markdown-report",
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runWithArgs(args, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected success exit code 0, got %d stderr=%s", code, stderr.String())
+	}
+
+	reportPath := filepath.Join(runRoot, defaultTokenSavingsOutputPath)
+	contentBytes, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("read default token savings json artifact: %v", err)
+	}
+
+	report := tokenSavingsSmokeReport{}
+	if err := json.Unmarshal(contentBytes, &report); err != nil {
+		t.Fatalf("decode default token savings json artifact: %v\nartifact=%s", err, string(contentBytes))
+	}
+	if len(report.Cases) == 0 {
+		t.Fatalf("expected per-case savings rows in default token savings artifact, got %#v", report)
+	}
+	if report.Aggregate.CaseCount == 0 || report.Aggregate.WithMCP.TotalTokens == 0 || report.Aggregate.WithoutMCP.TotalTokens == 0 {
+		t.Fatalf("expected aggregate savings metrics in default token savings artifact, got %#v", report.Aggregate)
+	}
+}
+
 func TestRunWithArgsTokenSavingsSmokeWritesMarkdownReportWithFrontMatter(t *testing.T) {
 	fixturesDir := writeTokenSavingsMarkdownFixtures(t)
 
@@ -571,7 +616,6 @@ func TestRunWithArgsTokenSavingsSmokeWritesMarkdownReportWithFrontMatter(t *test
 		"- provider-ollama",
 		"- '[[Eval-Index]]'",
 		"- '[[Savings-Index]]'",
-		"- '[[token-savings-smoke]]'",
 		"- JSON Artifact: `" + outPath + "`",
 		"- Indexed Repo: `token-savings-token-savings-markdown-test`",
 		"| ollama | sqlite | token-savings-test-model |",
@@ -601,6 +645,57 @@ func TestRunWithArgsTokenSavingsSmokeWritesMarkdownReportWithFrontMatter(t *test
 		if !strings.Contains(indexContent, expected) {
 			t.Fatalf("expected token savings index to include %q\nfull index:\n%s", expected, indexContent)
 		}
+	}
+}
+
+func TestRunWithArgsTokenSavingsSmokeLinksNeighboringBenchmarkRuns(t *testing.T) {
+	fixturesDir := writeTokenSavingsMarkdownFixtures(t)
+
+	restore := overrideEvalRunnerHooks(
+		tokenSavingsTestLoadConfigFn(),
+		tokenSavingsTestBackendFactory,
+		tokenSavingsTestEmbedderFactory,
+		closeBackendFn,
+		func() time.Time { return time.Date(2026, time.May, 1, 9, 30, 0, 0, time.UTC) },
+	)
+	defer restore()
+
+	reportDir := filepath.Join(t.TempDir(), "docs", "evals", "savings-runs")
+	if err := os.MkdirAll(reportDir, 0o755); err != nil {
+		t.Fatalf("create token savings report dir: %v", err)
+	}
+	olderReportPath := filepath.Join(reportDir, "20260430-083000z-token-savings-markdown-test.md")
+	if err := os.WriteFile(olderReportPath, []byte("# prior run\n"), 0o644); err != nil {
+		t.Fatalf("seed older token savings report: %v", err)
+	}
+
+	args := []string{
+		"--mode", "token-savings-smoke",
+		"--fixtures-dir", fixturesDir,
+		"--out", filepath.Join(t.TempDir(), "outputs", "token-savings-smoke.json"),
+		"--markdown-report-dir", reportDir,
+		"--skip-markdown-report=false",
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runWithArgs(args, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected success exit code 0, got %d stderr=%s", code, stderr.String())
+	}
+
+	reportPath := filepath.Join(reportDir, "20260501-093000z-token-savings-markdown-test.md")
+	contentBytes, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("read token savings markdown report: %v", err)
+	}
+	content := string(contentBytes)
+
+	if !strings.Contains(content, "- '[[20260430-083000z-token-savings-markdown-test]]'") {
+		t.Fatalf("expected token savings markdown report to link neighboring benchmark run\nfull report:\n%s", content)
+	}
+	if strings.Contains(content, "[[token-savings-smoke]]") {
+		t.Fatalf("expected token savings markdown report to avoid unresolved dataset wiki-link\nfull report:\n%s", content)
 	}
 }
 
@@ -1257,6 +1352,7 @@ func TestRunWithArgsWritesMarkdownReportWithFrontMatter(t *testing.T) {
 		"type: reference",
 		"title: Eval Index",
 		"created: 2026-04-28",
+		"- '[[Savings-Index]]'",
 		"- [[20260428-100000z-eval-fixtures-test]]",
 	} {
 		if !strings.Contains(indexContent, expected) {

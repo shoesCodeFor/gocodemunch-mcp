@@ -30,10 +30,12 @@ This phase builds the full benchmark workflow requested in discovery: a fixed pr
   - Completed on 2026-05-02: the token-savings benchmark runner now upserts per-combination benchmark history rows plus competitor scorecards into dedicated SQLite tables, stores benchmark-linked telemetry snapshots without polluting normal runtime snapshot restore/load paths, and excludes the current deterministic run ID when rebuilding trends so repeated reruns remain idempotent.
   - Verified with `go test ./src/internal/storage ./src/internal/telemetry ./src/cmd/gocodemunch-eval ./src/server -count=1`, `go vet ./src/internal/storage ./src/internal/telemetry ./src/cmd/gocodemunch-eval ./src/server`, and `go test ./src/... -count=1`.
 
-- [ ] Emit structured benchmark artifacts for graph-based navigation:
+- [x] Emit structured benchmark artifacts for graph-based navigation:
   - Write JSON reports to `Auto Run Docs/Working/evals/` with per-prompt and aggregate savings sections.
   - Write Markdown reports with YAML front matter (`type: report`, `title`, `created`, `tags`, `related`) and wiki-links between benchmark runs, `Eval-Index`, and a new savings index.
   - Update/create index-style Markdown pages that list newest-first run links for fast browsing.
+  - Completed on 2026-05-02: token-savings smoke runs now verify the default `Auto Run Docs/Working/evals/token-savings-smoke.json` artifact path, markdown reports link to real neighboring benchmark runs instead of a dangling dataset wiki-link, and `Eval-Index` now links back to `[[Savings-Index]]` for graph navigation.
+  - Verified with `go test ./src/cmd/gocodemunch-eval -count=1`, `go test ./src/... ./tests-go -count=1`, `go vet ./src/cmd/gocodemunch-eval`, and `go vet ./src/...`.
 
 - [ ] Add command and Makefile ergonomics for repeatable benchmark runs:
   - Add CLI flags for suite path, competitors, output path, and trend window selection with safe defaults.

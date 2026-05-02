@@ -1200,7 +1200,11 @@ func writeTokenSavingsMarkdownRunReport(
 
 	fileName := buildMarkdownReportFileName(report.Dataset, report.GeneratedAtUTC)
 	reportPath := filepath.Join(reportDir, fileName)
-	content := renderTokenSavingsMarkdownRunReport(report, jsonOutPath)
+	relatedLinks, err := collectTokenSavingsMarkdownRelatedLinks(reportDir, reportPath)
+	if err != nil {
+		return "", err
+	}
+	content := renderTokenSavingsMarkdownRunReport(report, jsonOutPath, relatedLinks)
 	if err := os.WriteFile(reportPath, []byte(content), 0o644); err != nil {
 		return "", fmt.Errorf("write token savings markdown report %q: %w", reportPath, err)
 	}
@@ -1218,7 +1222,11 @@ func writeTokenSavingsIndex(markdownReportDir string, markdownReportPath string,
 	)
 }
 
-func renderTokenSavingsMarkdownRunReport(report tokenSavingsSmokeReport, jsonOutPath string) string {
+func renderTokenSavingsMarkdownRunReport(
+	report tokenSavingsSmokeReport,
+	jsonOutPath string,
+	relatedLinks []string,
+) string {
 	createdDate := createdDateFromRFC3339(report.GeneratedAtUTC)
 	title := fmt.Sprintf(
 		"Token Savings Run %s %s",
@@ -1226,7 +1234,6 @@ func renderTokenSavingsMarkdownRunReport(report tokenSavingsSmokeReport, jsonOut
 		strings.TrimSpace(report.GeneratedAtUTC),
 	)
 	tags := collectTokenSavingsMarkdownTags(report)
-	relatedLinks := collectTokenSavingsMarkdownRelatedLinks(jsonOutPath)
 	competitors := orderedTokenSavingsCompetitors(report.CompetitorPricing)
 	combinations := tokenSavingsReportCombinations(report)
 
@@ -1438,17 +1445,17 @@ func collectTokenSavingsMarkdownTags(report tokenSavingsSmokeReport) []string {
 	return tags
 }
 
-func collectTokenSavingsMarkdownRelatedLinks(jsonOutPath string) []string {
+func collectTokenSavingsMarkdownRelatedLinks(reportDir string, reportPath string) ([]string, error) {
 	relatedSet := map[string]struct{}{
 		"Eval-Index":    {},
 		"Savings-Index": {},
 	}
-	if outPath := strings.TrimSpace(jsonOutPath); outPath != "" {
-		baseName := strings.TrimSuffix(filepath.Base(outPath), filepath.Ext(outPath))
-		baseName = strings.TrimSpace(baseName)
-		if baseName != "" {
-			relatedSet[baseName] = struct{}{}
-		}
+	neighbors, err := neighboringMarkdownRunLinks(reportDir, reportPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve token savings markdown related links: %w", err)
+	}
+	for _, link := range neighbors {
+		relatedSet[link] = struct{}{}
 	}
 
 	related := make([]string, 0, len(relatedSet))
@@ -1456,7 +1463,7 @@ func collectTokenSavingsMarkdownRelatedLinks(jsonOutPath string) []string {
 		related = append(related, link)
 	}
 	slices.Sort(related)
-	return related
+	return related, nil
 }
 
 func orderedTokenSavingsCompetitors(

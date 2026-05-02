@@ -1384,6 +1384,53 @@ func sortMarkdownRunLinksNewestFirst(links []string) {
 	})
 }
 
+func neighboringMarkdownRunLinks(reportDir string, reportPath string) ([]string, error) {
+	reportDocName := normalizeMarkdownRunDocName(strings.TrimSpace(reportPath))
+	if reportDocName == "" {
+		return nil, errors.New("markdown report path must include a timestamped filename")
+	}
+
+	reportDir = filepath.Clean(strings.TrimSpace(reportDir))
+	if reportDir == "." || reportDir == "" {
+		return nil, errors.New("markdown report dir must be non-empty")
+	}
+
+	entries, err := os.ReadDir(reportDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read markdown report directory %q: %w", reportDir, err)
+	}
+
+	links := make([]string, 0, len(entries)+1)
+	links = append(links, reportDocName)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if normalized := normalizeMarkdownRunDocName(entry.Name()); normalized != "" {
+			links = append(links, normalized)
+		}
+	}
+	links = uniqueMarkdownRunLinks(links)
+	sortMarkdownRunLinksNewestFirst(links)
+
+	currentIndex := slices.Index(links, reportDocName)
+	if currentIndex < 0 {
+		return nil, nil
+	}
+
+	neighbors := make([]string, 0, 2)
+	if currentIndex > 0 {
+		neighbors = append(neighbors, links[currentIndex-1])
+	}
+	if currentIndex+1 < len(links) {
+		neighbors = append(neighbors, links[currentIndex+1])
+	}
+	return neighbors, nil
+}
+
 func parseMarkdownRunDocTime(docName string) (time.Time, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(docName))
 	if len(normalized) < len("20060102-150405z") {
@@ -1411,7 +1458,8 @@ func renderEvalIndexMarkdown(createdDate string, links []string) string {
 	b.WriteString("tags:\n")
 	b.WriteString("  - eval\n")
 	b.WriteString("  - index\n")
-	b.WriteString("related: []\n")
+	b.WriteString("related:\n")
+	b.WriteString("  - '[[Savings-Index]]'\n")
 	b.WriteString("---\n\n")
 	b.WriteString("# Eval Index\n\n")
 	b.WriteString("Newest-first wiki-links to reports in `docs/evals/runs`.\n\n")
