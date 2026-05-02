@@ -23,10 +23,12 @@ This phase builds the full benchmark workflow requested in discovery: a fixed pr
   - Completed on 2026-05-01: token-savings JSON reports now emit per-case and aggregate competitor scorecards (`tokens_saved`, `cost_saved_usd`, `savings_pct`), suite distribution metrics for token/cost savings, and per-competitor trend series that append the current run onto historical SQLite telemetry snapshots when available.
   - Verified with `go test ./src/cmd/gocodemunch-eval -count=1`, `go test ./src/internal/storage -count=1`, `go test ./src/internal/telemetry ./src/server -count=1`, `go vet ./src/cmd/gocodemunch-eval ./src/internal/storage ./src/internal/telemetry ./src/server`, and `go test ./src/... ./tests-go -count=1`.
 
-- [ ] Persist benchmark history for longitudinal analysis:
+- [x] Persist benchmark history for longitudinal analysis:
   - Store run-level metadata (timestamp, suite version, mode, competitor, aggregate metrics) in SQLite tables dedicated to savings benchmarks.
   - Keep references from runtime telemetry snapshots to benchmark runs where applicable.
   - Add idempotency guards so reruns with the same run ID do not create duplicate trend entries.
+  - Completed on 2026-05-02: the token-savings benchmark runner now upserts per-combination benchmark history rows plus competitor scorecards into dedicated SQLite tables, stores benchmark-linked telemetry snapshots without polluting normal runtime snapshot restore/load paths, and excludes the current deterministic run ID when rebuilding trends so repeated reruns remain idempotent.
+  - Verified with `go test ./src/internal/storage ./src/internal/telemetry ./src/cmd/gocodemunch-eval ./src/server -count=1`, `go vet ./src/internal/storage ./src/internal/telemetry ./src/cmd/gocodemunch-eval ./src/server`, and `go test ./src/... -count=1`.
 
 - [ ] Emit structured benchmark artifacts for graph-based navigation:
   - Write JSON reports to `Auto Run Docs/Working/evals/` with per-prompt and aggregate savings sections.

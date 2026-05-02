@@ -17,6 +17,7 @@ import (
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/config"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/domain/indexing"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/savings"
+	"github.com/jgravelle/gocodemunch-mcp/src/internal/storage"
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/telemetry"
 )
 
@@ -749,6 +750,142 @@ func TestRunWithArgsTokenSavingsSmokeReportOutputDeterminism(t *testing.T) {
 	runLink := "[[20260501-093000z-token-savings-markdown-test]]"
 	if strings.Count(string(indexRun2), runLink) != 1 {
 		t.Fatalf("expected token savings index to contain deterministic run link exactly once, index:\n%s", string(indexRun2))
+	}
+}
+
+func TestRunWithArgsTokenSavingsSmokePersistsBenchmarkHistoryAcrossRuns(t *testing.T) {
+	fixturesDir := writeTokenSavingsMarkdownFixtures(t)
+	storageRoot := t.TempDir()
+	currentTime := time.Date(2026, time.May, 1, 9, 30, 0, 0, time.UTC)
+
+	restore := overrideEvalRunnerHooks(
+		tokenSavingsTestLoadConfigWithStoragePath(storageRoot),
+		tokenSavingsTestBackendFactory,
+		tokenSavingsTestEmbedderFactory,
+		closeBackendFn,
+		func() time.Time { return currentTime },
+	)
+	defer restore()
+
+	args := []string{
+		"--mode", "token-savings-smoke",
+		"--fixtures-dir", fixturesDir,
+		"--out", filepath.Join(t.TempDir(), "outputs", "token-savings-history.json"),
+		"--skip-markdown-report",
+	}
+
+	var stdoutRun1 bytes.Buffer
+	var stderrRun1 bytes.Buffer
+	if code := runWithArgs(args, &stdoutRun1, &stderrRun1); code != 0 {
+		t.Fatalf("expected first token savings history run success, got code=%d stderr=%s", code, stderrRun1.String())
+	}
+
+	reportRun1 := tokenSavingsSmokeReport{}
+	if err := json.Unmarshal(stdoutRun1.Bytes(), &reportRun1); err != nil {
+		t.Fatalf("decode first token savings history report: %v output=%s", err, stdoutRun1.String())
+	}
+	if len(reportRun1.Aggregate.Trends["codex"]) != 1 {
+		t.Fatalf("expected one current-run trend point before history exists, got %#v", reportRun1.Aggregate.Trends)
+	}
+
+	currentTime = currentTime.Add(5 * time.Minute)
+
+	var stdoutRun2 bytes.Buffer
+	var stderrRun2 bytes.Buffer
+	if code := runWithArgs(args, &stdoutRun2, &stderrRun2); code != 0 {
+		t.Fatalf("expected second token savings history run success, got code=%d stderr=%s", code, stderrRun2.String())
+	}
+
+	reportRun2 := tokenSavingsSmokeReport{}
+	if err := json.Unmarshal(stdoutRun2.Bytes(), &reportRun2); err != nil {
+		t.Fatalf("decode second token savings history report: %v output=%s", err, stdoutRun2.String())
+	}
+	if len(reportRun2.Aggregate.Trends["codex"]) != 2 {
+		t.Fatalf("expected prior persisted benchmark run plus current point, got %#v", reportRun2.Aggregate.Trends)
+	}
+	if reportRun2.Aggregate.Trends["codex"][0].CapturedAtUTC != "2026-05-01T09:30:00Z" ||
+		reportRun2.Aggregate.Trends["codex"][1].CapturedAtUTC != "2026-05-01T09:35:00Z" {
+		t.Fatalf("unexpected persisted trend timestamps: %#v", reportRun2.Aggregate.Trends["codex"])
+	}
+
+	store, err := storage.NewSQLiteTelemetryStore(storageRoot)
+	if err != nil {
+		t.Fatalf("open persisted token savings history store: %v", err)
+	}
+	runs, err := store.LoadSavingsBenchmarkRuns(context.Background(), storage.SavingsBenchmarkRunFilter{
+		Dataset:      "token-savings-markdown-test",
+		SuiteVersion: "v-markdown",
+		Mode:         "token-savings-smoke",
+		Provider:     "ollama",
+		Backend:      "sqlite",
+		Model:        "token-savings-test-model",
+	})
+	if err != nil {
+		t.Fatalf("load persisted token savings benchmark history: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("expected two persisted benchmark history rows after two unique runs, got %#v", runs)
+	}
+}
+
+func TestRunWithArgsTokenSavingsSmokeDedupesRepeatedRunID(t *testing.T) {
+	fixturesDir := writeTokenSavingsMarkdownFixtures(t)
+	storageRoot := t.TempDir()
+	fixedTime := time.Date(2026, time.May, 1, 9, 30, 0, 0, time.UTC)
+
+	restore := overrideEvalRunnerHooks(
+		tokenSavingsTestLoadConfigWithStoragePath(storageRoot),
+		tokenSavingsTestBackendFactory,
+		tokenSavingsTestEmbedderFactory,
+		closeBackendFn,
+		func() time.Time { return fixedTime },
+	)
+	defer restore()
+
+	args := []string{
+		"--mode", "token-savings-smoke",
+		"--fixtures-dir", fixturesDir,
+		"--out", filepath.Join(t.TempDir(), "outputs", "token-savings-dedupe.json"),
+		"--skip-markdown-report",
+	}
+
+	var stdoutRun1 bytes.Buffer
+	var stderrRun1 bytes.Buffer
+	if code := runWithArgs(args, &stdoutRun1, &stderrRun1); code != 0 {
+		t.Fatalf("expected first token savings dedupe run success, got code=%d stderr=%s", code, stderrRun1.String())
+	}
+
+	var stdoutRun2 bytes.Buffer
+	var stderrRun2 bytes.Buffer
+	if code := runWithArgs(args, &stdoutRun2, &stderrRun2); code != 0 {
+		t.Fatalf("expected second token savings dedupe run success, got code=%d stderr=%s", code, stderrRun2.String())
+	}
+
+	reportRun2 := tokenSavingsSmokeReport{}
+	if err := json.Unmarshal(stdoutRun2.Bytes(), &reportRun2); err != nil {
+		t.Fatalf("decode repeated-run token savings report: %v output=%s", err, stdoutRun2.String())
+	}
+	if len(reportRun2.Aggregate.Trends["codex"]) != 1 {
+		t.Fatalf("expected repeated run with identical run id to remain idempotent, got %#v", reportRun2.Aggregate.Trends)
+	}
+
+	store, err := storage.NewSQLiteTelemetryStore(storageRoot)
+	if err != nil {
+		t.Fatalf("open dedupe token savings history store: %v", err)
+	}
+	runs, err := store.LoadSavingsBenchmarkRuns(context.Background(), storage.SavingsBenchmarkRunFilter{
+		Dataset:      "token-savings-markdown-test",
+		SuiteVersion: "v-markdown",
+		Mode:         "token-savings-smoke",
+		Provider:     "ollama",
+		Backend:      "sqlite",
+		Model:        "token-savings-test-model",
+	})
+	if err != nil {
+		t.Fatalf("load deduped token savings benchmark history: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("expected a single persisted benchmark row for repeated run id, got %#v", runs)
 	}
 }
 
@@ -1485,8 +1622,13 @@ func writeTokenSavingsMarkdownFixtures(t *testing.T) string {
 }
 
 func tokenSavingsTestLoadConfigFn() func() (config.Config, error) {
+	return tokenSavingsTestLoadConfigWithStoragePath("")
+}
+
+func tokenSavingsTestLoadConfigWithStoragePath(storagePath string) func() (config.Config, error) {
 	return func() (config.Config, error) {
 		return config.Config{
+			StoragePath:    storagePath,
 			Disabled:       map[string]struct{}{},
 			EmbeddingModel: "token-savings-test-model",
 			VLLMModel:      "token-savings-vllm-model",

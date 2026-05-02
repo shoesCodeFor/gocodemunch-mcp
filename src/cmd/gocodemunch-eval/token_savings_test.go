@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/jgravelle/gocodemunch-mcp/src/internal/config"
-	"github.com/jgravelle/gocodemunch-mcp/src/internal/telemetry"
+	"github.com/jgravelle/gocodemunch-mcp/src/internal/storage"
 )
 
 func TestNormalizeTokenSavingsModesRequiresExplicitBothModes(t *testing.T) {
@@ -141,7 +141,7 @@ func TestBuildTokenSavingsDistributionReportCalculatesSuiteStats(t *testing.T) {
 	}
 }
 
-func TestBuildTokenSavingsTrendSeriesMergesHistoricalSnapshots(t *testing.T) {
+func TestBuildTokenSavingsTrendSeriesFromBenchmarkRuns(t *testing.T) {
 	t.Parallel()
 
 	pricing := map[string]config.SavingsCompetitorPricing{
@@ -150,27 +150,30 @@ func TestBuildTokenSavingsTrendSeriesMergesHistoricalSnapshots(t *testing.T) {
 		"amp":         {InputUSDPerMTok: 1.5, OutputUSDPerMTok: 6.0},
 	}
 
-	trends := buildTokenSavingsTrendSeries(
-		[]telemetry.PersistedCumulativeSnapshot{
+	trends := buildTokenSavingsTrendSeriesFromBenchmarkRuns(
+		[]storage.SavingsBenchmarkRun{
 			{
-				CapturedAt: time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC),
-				Cumulative: telemetry.CumulativeSnapshot{
-					TotalTokens:    100,
-					TokensSaved:    20,
-					CostAvoidedUSD: map[string]float64{"claude_code": 0.06, "codex": 0.03, "amp": 0.03},
+				CapturedAt:  time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC),
+				TokensSaved: 20,
+				SavingsPct:  0.166667,
+				CompetitorScores: map[string]storage.SavingsBenchmarkCompetitorScore{
+					"claude_code": {TokensSaved: 20, CostSavedUSD: 0.06, SavingsPct: 0.166667},
+					"codex":       {TokensSaved: 20, CostSavedUSD: 0.03, SavingsPct: 0.166667},
+					"amp":         {TokensSaved: 20, CostSavedUSD: 0.03, SavingsPct: 0.166667},
 				},
 			},
 			{
-				CapturedAt: time.Date(2026, 5, 1, 12, 5, 0, 0, time.UTC),
-				Cumulative: telemetry.CumulativeSnapshot{
-					TotalTokens:    250,
-					TokensSaved:    50,
-					CostAvoidedUSD: map[string]float64{"claude_code": 0.15, "codex": 0.075, "amp": 0.075},
+				CapturedAt:  time.Date(2026, 5, 1, 12, 5, 0, 0, time.UTC),
+				TokensSaved: 30,
+				SavingsPct:  0.166667,
+				CompetitorScores: map[string]storage.SavingsBenchmarkCompetitorScore{
+					"claude_code": {TokensSaved: 30, CostSavedUSD: 0.045, SavingsPct: 0.166667},
+					"codex":       {TokensSaved: 30, CostSavedUSD: 0.045, SavingsPct: 0.166667},
+					"amp":         {TokensSaved: 30, CostSavedUSD: 0.045, SavingsPct: 0.166667},
 				},
 			},
 		},
 		time.Date(2026, 5, 1, 12, 10, 0, 0, time.UTC),
-		80,
 		tokenSavingsDeltaReport{
 			TokensSaved:  40,
 			SavingsPct:   0.333333,

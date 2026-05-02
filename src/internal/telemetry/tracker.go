@@ -89,6 +89,7 @@ type CumulativeSnapshot struct {
 // PersistedCumulativeSnapshot captures a point-in-time cumulative snapshot row.
 type PersistedCumulativeSnapshot struct {
 	CapturedAt            time.Time          `json:"captured_at"`
+	BenchmarkRunID        string             `json:"benchmark_run_id,omitempty"`
 	PricingProfileVersion string             `json:"pricing_profile_version,omitempty"`
 	Cumulative            CumulativeSnapshot `json:"cumulative"`
 }

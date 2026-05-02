@@ -20,7 +20,7 @@ import (
 const (
 	telemetrySQLiteFileName             = "savings-telemetry.db"
 	telemetrySQLiteLegacySchemaVersion  = 1
-	telemetrySQLiteCurrentSchemaVersion = 2
+	telemetrySQLiteCurrentSchemaVersion = 3
 	defaultTelemetryCallEventRetention  = 30 * 24 * time.Hour
 )
 
@@ -299,7 +299,22 @@ func detectSQLiteTelemetrySchemaVersion(db *sql.DB) (int, error) {
 		return 0, err
 	}
 	if hasCallEvents {
-		return telemetrySQLiteCurrentSchemaVersion, nil
+		hasBenchmarkRuns, err := sqliteTelemetryTableExists(db, "savings_benchmark_runs")
+		if err != nil {
+			return 0, err
+		}
+		hasBenchmarkCompetitors, err := sqliteTelemetryTableExists(db, "savings_benchmark_competitors")
+		if err != nil {
+			return 0, err
+		}
+		hasBenchmarkRunColumn, err := sqliteTelemetryColumnExists(db, "cumulative_snapshots", "benchmark_run_id")
+		if err != nil {
+			return 0, err
+		}
+		if hasBenchmarkRuns && hasBenchmarkCompetitors && hasBenchmarkRunColumn {
+			return telemetrySQLiteCurrentSchemaVersion, nil
+		}
+		return 2, nil
 	}
 
 	hasSnapshots, err := sqliteTelemetryTableExists(db, "cumulative_snapshots")
@@ -322,6 +337,35 @@ func sqliteTelemetryTableExists(db *sql.DB, table string) (bool, error) {
 		return false, fmt.Errorf("probe telemetry sqlite table %q: %w", table, err)
 	}
 	return exists > 0, nil
+}
+
+func sqliteTelemetryColumnExists(db *sql.DB, table string, column string) (bool, error) {
+	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return false, fmt.Errorf("probe telemetry sqlite table info %q: %w", table, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			columnType string
+			notNull    int
+			defaultVal any
+			pk         int
+		)
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultVal, &pk); err != nil {
+			return false, fmt.Errorf("scan telemetry sqlite table info %q: %w", table, err)
+		}
+		if strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(column)) {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("iterate telemetry sqlite table info %q: %w", table, err)
+	}
+	return false, nil
 }
 
 func applySQLiteTelemetryMigration(db *sql.DB, targetVersion int) error {
@@ -368,6 +412,60 @@ func applySQLiteTelemetryMigration(db *sql.DB, targetVersion int) error {
 			`CREATE INDEX IF NOT EXISTS idx_call_events_tool_name_captured_at
 				ON call_events(tool_name, captured_at DESC)`,
 		}
+	case 3:
+		statements = []string{
+			`ALTER TABLE cumulative_snapshots
+				ADD COLUMN benchmark_run_id TEXT NOT NULL DEFAULT ''`,
+			`CREATE INDEX IF NOT EXISTS idx_cumulative_snapshots_benchmark_run_id_captured_at
+				ON cumulative_snapshots(benchmark_run_id, captured_at DESC)`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_cumulative_snapshots_benchmark_run_id_unique
+				ON cumulative_snapshots(benchmark_run_id)
+				WHERE benchmark_run_id <> ''`,
+			`CREATE TABLE IF NOT EXISTS savings_benchmark_runs (
+				run_id TEXT PRIMARY KEY,
+				captured_at TEXT NOT NULL,
+				dataset TEXT NOT NULL,
+				suite_version TEXT NOT NULL,
+				mode TEXT NOT NULL,
+				provider TEXT NOT NULL,
+				backend TEXT NOT NULL,
+				model TEXT NOT NULL,
+				indexed_repo TEXT NOT NULL,
+				file_count INTEGER NOT NULL,
+				case_count INTEGER NOT NULL,
+				with_mcp_input_tokens INTEGER NOT NULL,
+				with_mcp_output_tokens INTEGER NOT NULL,
+				with_mcp_total_tokens INTEGER NOT NULL,
+				without_mcp_input_tokens INTEGER NOT NULL,
+				without_mcp_output_tokens INTEGER NOT NULL,
+				without_mcp_total_tokens INTEGER NOT NULL,
+				tokens_saved INTEGER NOT NULL,
+				savings_pct REAL NOT NULL,
+				payload TEXT NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_savings_benchmark_runs_filter
+				ON savings_benchmark_runs(
+					dataset,
+					suite_version,
+					mode,
+					provider,
+					backend,
+					model,
+					captured_at ASC
+				)`,
+			`CREATE TABLE IF NOT EXISTS savings_benchmark_competitors (
+				run_id TEXT NOT NULL,
+				competitor TEXT NOT NULL,
+				tokens_saved INTEGER NOT NULL,
+				cost_saved_usd REAL NOT NULL,
+				savings_pct REAL NOT NULL,
+				payload TEXT NOT NULL,
+				PRIMARY KEY (run_id, competitor),
+				FOREIGN KEY(run_id) REFERENCES savings_benchmark_runs(run_id) ON DELETE CASCADE
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_savings_benchmark_competitors_competitor_run
+				ON savings_benchmark_competitors(competitor, run_id)`,
+		}
 	default:
 		return fmt.Errorf("unsupported telemetry sqlite schema migration target %d", targetVersion)
 	}
@@ -402,7 +500,10 @@ func loadLatestSQLiteTelemetrySnapshot(
 	var payload string
 	if err := db.QueryRowContext(
 		ctx,
-		`SELECT payload FROM cumulative_snapshots ORDER BY snapshot_id DESC LIMIT 1`,
+		`SELECT payload FROM cumulative_snapshots
+			WHERE (benchmark_run_id = '' OR benchmark_run_id IS NULL)
+			ORDER BY snapshot_id DESC
+			LIMIT 1`,
 	).Scan(&payload); err != nil {
 		return telemetry.PersistedCumulativeSnapshot{}, err
 	}
@@ -419,10 +520,11 @@ func loadSQLiteTelemetrySnapshots(
 	db *sql.DB,
 	since time.Time,
 ) ([]telemetry.PersistedCumulativeSnapshot, error) {
-	query := `SELECT payload FROM cumulative_snapshots`
+	query := `SELECT payload FROM cumulative_snapshots
+		WHERE (benchmark_run_id = '' OR benchmark_run_id IS NULL)`
 	args := []any{}
 	if !since.IsZero() {
-		query += ` WHERE captured_at >= ?`
+		query += ` AND captured_at >= ?`
 		args = append(args, since.Format(time.RFC3339Nano))
 	}
 	query += ` ORDER BY captured_at ASC, snapshot_id ASC`
@@ -458,18 +560,6 @@ func saveSQLiteTelemetrySnapshot(
 	db *sql.DB,
 	snapshot telemetry.PersistedCumulativeSnapshot,
 ) error {
-	if snapshot.CapturedAt.IsZero() {
-		snapshot.CapturedAt = time.Now().UTC()
-	} else {
-		snapshot.CapturedAt = snapshot.CapturedAt.UTC()
-	}
-
-	payloadBytes, err := json.Marshal(snapshot)
-	if err != nil {
-		return fmt.Errorf("encode telemetry snapshot: %w", err)
-	}
-	payload := string(payloadBytes)
-
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin telemetry sqlite tx: %w", err)
@@ -478,37 +568,82 @@ func saveSQLiteTelemetrySnapshot(
 		_ = tx.Rollback()
 	}()
 
-	metaValues := map[string]string{
-		"last_captured_at": snapshot.CapturedAt.Format(time.RFC3339Nano),
-		"session_count":    fmt.Sprintf("%d", snapshot.Cumulative.SessionCount),
-		"call_count":       fmt.Sprintf("%d", snapshot.Cumulative.CallCount),
-		"tokens_saved":     fmt.Sprintf("%d", snapshot.Cumulative.TokensSaved),
+	if err := saveSQLiteTelemetrySnapshotTx(ctx, tx, snapshot); err != nil {
+		return err
 	}
-	if version := strings.TrimSpace(snapshot.PricingProfileVersion); version != "" {
-		metaValues["pricing_profile_version"] = version
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit telemetry sqlite tx: %w", err)
 	}
-	for key, value := range metaValues {
+	return nil
+}
+
+func saveSQLiteTelemetrySnapshotTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	snapshot telemetry.PersistedCumulativeSnapshot,
+) error {
+	if snapshot.CapturedAt.IsZero() {
+		snapshot.CapturedAt = time.Now().UTC()
+	} else {
+		snapshot.CapturedAt = snapshot.CapturedAt.UTC()
+	}
+	snapshot.BenchmarkRunID = strings.TrimSpace(snapshot.BenchmarkRunID)
+
+	payloadBytes, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("encode telemetry snapshot: %w", err)
+	}
+	payload := string(payloadBytes)
+
+	if snapshot.BenchmarkRunID == "" {
+		metaValues := map[string]string{
+			"last_captured_at": snapshot.CapturedAt.Format(time.RFC3339Nano),
+			"session_count":    fmt.Sprintf("%d", snapshot.Cumulative.SessionCount),
+			"call_count":       fmt.Sprintf("%d", snapshot.Cumulative.CallCount),
+			"tokens_saved":     fmt.Sprintf("%d", snapshot.Cumulative.TokensSaved),
+		}
+		if version := strings.TrimSpace(snapshot.PricingProfileVersion); version != "" {
+			metaValues["pricing_profile_version"] = version
+		}
+		for key, value := range metaValues {
+			if _, err := tx.ExecContext(
+				ctx,
+				`INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)`,
+				key,
+				value,
+			); err != nil {
+				return fmt.Errorf("write telemetry sqlite meta: %w", err)
+			}
+		}
+	}
+
+	if snapshot.BenchmarkRunID == "" {
 		if _, err := tx.ExecContext(
 			ctx,
-			`INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)`,
-			key,
-			value,
+			`INSERT INTO cumulative_snapshots(captured_at, benchmark_run_id, payload)
+				VALUES(?, ?, ?)`,
+			snapshot.CapturedAt.Format(time.RFC3339Nano),
+			snapshot.BenchmarkRunID,
+			payload,
 		); err != nil {
-			return fmt.Errorf("write telemetry sqlite meta: %w", err)
+			return fmt.Errorf("write telemetry sqlite snapshot: %w", err)
 		}
+		return nil
 	}
 
 	if _, err := tx.ExecContext(
 		ctx,
-		`INSERT INTO cumulative_snapshots(captured_at, payload) VALUES(?, ?)`,
+		`INSERT INTO cumulative_snapshots(captured_at, benchmark_run_id, payload)
+			VALUES(?, ?, ?)
+			ON CONFLICT DO UPDATE SET
+				captured_at = excluded.captured_at,
+				benchmark_run_id = excluded.benchmark_run_id,
+				payload = excluded.payload`,
 		snapshot.CapturedAt.Format(time.RFC3339Nano),
+		snapshot.BenchmarkRunID,
 		payload,
 	); err != nil {
-		return fmt.Errorf("write telemetry sqlite snapshot: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit telemetry sqlite tx: %w", err)
+		return fmt.Errorf("upsert benchmark-linked telemetry snapshot: %w", err)
 	}
 	return nil
 }

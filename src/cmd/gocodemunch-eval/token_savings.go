@@ -220,10 +220,6 @@ func runTokenSavingsSmokeMode(
 	defer cleanupCorpus()
 
 	pricing, _ := savings.NormalizePricing(cfg.SavingsCompetitorPricing)
-	historicalSnapshots, err := loadTokenSavingsHistoricalSnapshots(ctx, cfg.StoragePath)
-	if err != nil {
-		historicalSnapshots = nil
-	}
 
 	documentsByPath := make(map[string]fixtureDocument, len(fixtures.Documents))
 	for _, doc := range fixtures.Documents {
@@ -235,8 +231,29 @@ func runTokenSavingsSmokeMode(
 		comboCfg := cfg
 		comboCfg.EmbeddingProvider = combo.Provider
 		comboCfg.VectorBackend = combo.Backend
+		comboModel := configuredEmbeddingModel(comboCfg, combo.Provider)
+		benchmarkRunID := buildTokenSavingsBenchmarkRunID(
+			fixtures.Dataset,
+			fixtures.SuiteVersion,
+			generatedAt,
+			combo.Provider,
+			combo.Backend,
+			comboModel,
+		)
+		historicalRuns, err := loadTokenSavingsHistoricalRuns(ctx, cfg.StoragePath, storage.SavingsBenchmarkRunFilter{
+			Dataset:      fixtures.Dataset,
+			SuiteVersion: fixtures.SuiteVersion,
+			Mode:         evalModeTokenSavings,
+			Provider:     combo.Provider,
+			Backend:      combo.Backend,
+			Model:        comboModel,
+			ExcludeRunID: benchmarkRunID,
+		})
+		if err != nil {
+			historicalRuns = nil
+		}
 
-		comboReport, err := runTokenSavingsCombination(
+		comboReport, benchmarkSnapshot, err := runTokenSavingsCombination(
 			ctx,
 			comboCfg,
 			combo,
@@ -244,7 +261,7 @@ func runTokenSavingsSmokeMode(
 			pricing,
 			materializedRoot,
 			documentsByPath,
-			historicalSnapshots,
+			historicalRuns,
 			generatedAt,
 			keepData,
 			useCombinationDependencies,
@@ -252,6 +269,23 @@ func runTokenSavingsSmokeMode(
 		if err != nil {
 			return tokenSavingsSmokeReport{}, fmt.Errorf(
 				"run token savings combination provider=%s backend=%s: %w",
+				combo.Provider,
+				combo.Backend,
+				err,
+			)
+		}
+		if err := persistTokenSavingsBenchmarkRun(
+			ctx,
+			cfg.StoragePath,
+			buildTokenSavingsStoredBenchmarkRun(
+				benchmarkRunID,
+				fixtures,
+				comboReport,
+				benchmarkSnapshot,
+			),
+		); err != nil {
+			return tokenSavingsSmokeReport{}, fmt.Errorf(
+				"persist token savings history provider=%s backend=%s: %w",
 				combo.Provider,
 				combo.Backend,
 				err,
@@ -287,20 +321,20 @@ func runTokenSavingsCombination(
 	pricing map[string]config.SavingsCompetitorPricing,
 	materializedRoot string,
 	documentsByPath map[string]fixtureDocument,
-	historicalSnapshots []telemetry.PersistedCumulativeSnapshot,
+	historicalRuns []storage.SavingsBenchmarkRun,
 	generatedAt time.Time,
 	keepData bool,
 	useDependencies bool,
-) (tokenSavingsCombinationReport, error) {
+) (tokenSavingsCombinationReport, telemetry.PersistedCumulativeSnapshot, error) {
 	storagePath, cleanupStorage, err := resolveStoragePath("", keepData)
 	if err != nil {
-		return tokenSavingsCombinationReport{}, fmt.Errorf("resolve benchmark storage path: %w", err)
+		return tokenSavingsCombinationReport{}, telemetry.PersistedCumulativeSnapshot{}, fmt.Errorf("resolve benchmark storage path: %w", err)
 	}
 	defer cleanupStorage()
 
 	store, err := storage.NewSQLiteIndexStore(storagePath)
 	if err != nil {
-		return tokenSavingsCombinationReport{}, fmt.Errorf("create benchmark index store: %w", err)
+		return tokenSavingsCombinationReport{}, telemetry.PersistedCumulativeSnapshot{}, fmt.Errorf("create benchmark index store: %w", err)
 	}
 
 	tracker := telemetry.NewTracker(telemetry.PricingFromSavings(pricing), nowUTCFn)
@@ -319,7 +353,7 @@ func runTokenSavingsCombination(
 	if useDependencies {
 		vectorBackend, embedder, cleanup, err := createTokenSavingsVectorDependencies(serviceCfg, combo)
 		if err != nil {
-			return tokenSavingsCombinationReport{}, err
+			return tokenSavingsCombinationReport{}, telemetry.PersistedCumulativeSnapshot{}, err
 		}
 		deps.VectorBackend = vectorBackend
 		deps.Embedder = embedder
@@ -335,12 +369,12 @@ func runTokenSavingsCombination(
 		"use_ai_summaries": false,
 	})
 	if !payloadBool(indexPayload, "success") {
-		return tokenSavingsCombinationReport{}, fmt.Errorf("index fixture corpus: %s", payloadError(indexPayload))
+		return tokenSavingsCombinationReport{}, telemetry.PersistedCumulativeSnapshot{}, fmt.Errorf("index fixture corpus: %s", payloadError(indexPayload))
 	}
 
 	repoID := payloadString(indexPayload, "repo")
 	if repoID == "" {
-		return tokenSavingsCombinationReport{}, errors.New("index fixture corpus: missing repo id")
+		return tokenSavingsCombinationReport{}, telemetry.PersistedCumulativeSnapshot{}, errors.New("index fixture corpus: missing repo id")
 	}
 	reportedRepoID := buildTokenSavingsReportRepoID(fixtures.Dataset)
 
@@ -368,7 +402,7 @@ func runTokenSavingsCombination(
 			}
 			result, err := adapter.execute(ctx, executionCtx, benchmarkCase, promptTokens)
 			if err != nil {
-				return tokenSavingsCombinationReport{}, fmt.Errorf(
+				return tokenSavingsCombinationReport{}, telemetry.PersistedCumulativeSnapshot{}, fmt.Errorf(
 					"run case %q mode %s: %w",
 					benchmarkCase.ID,
 					adapter.name,
@@ -380,7 +414,7 @@ func runTokenSavingsCombination(
 
 		withMode, ok := modeResults[tokenSavingsModeWithMCP]
 		if !ok {
-			return tokenSavingsCombinationReport{}, fmt.Errorf(
+			return tokenSavingsCombinationReport{}, telemetry.PersistedCumulativeSnapshot{}, fmt.Errorf(
 				"run case %q: missing %s mode result",
 				benchmarkCase.ID,
 				tokenSavingsModeWithMCP,
@@ -388,7 +422,7 @@ func runTokenSavingsCombination(
 		}
 		withoutMode, ok := modeResults[tokenSavingsModeWithoutMCP]
 		if !ok {
-			return tokenSavingsCombinationReport{}, fmt.Errorf(
+			return tokenSavingsCombinationReport{}, telemetry.PersistedCumulativeSnapshot{}, fmt.Errorf(
 				"run case %q: missing %s mode result",
 				benchmarkCase.ID,
 				tokenSavingsModeWithoutMCP,
@@ -440,6 +474,11 @@ func runTokenSavingsCombination(
 		pricing,
 	)
 
+	benchmarkSnapshot := telemetry.PersistedCumulativeSnapshot{
+		CapturedAt: generatedAt.UTC(),
+		Cumulative: tracker.CumulativeSnapshot(),
+	}
+
 	return tokenSavingsCombinationReport{
 		Provider:    combo.Provider,
 		Backend:     combo.Backend,
@@ -453,9 +492,9 @@ func runTokenSavingsCombination(
 			WithoutMCP:   aggregateWithout,
 			Savings:      aggregateSavings,
 			Distribution: buildTokenSavingsDistributionReport(caseReports, pricing),
-			Trends:       buildTokenSavingsTrendSeries(historicalSnapshots, generatedAt, aggregateWith.TotalTokens, aggregateSavings, pricing),
+			Trends:       buildTokenSavingsTrendSeriesFromBenchmarkRuns(historicalRuns, generatedAt, aggregateSavings, pricing),
 		},
-	}, nil
+	}, benchmarkSnapshot, nil
 }
 
 func createTokenSavingsVectorDependencies(
@@ -860,6 +899,81 @@ func buildTokenSavingsDistributionMetric(samples []float64) tokenSavingsDistribu
 		Median: roundTokenSavingsFloat(tokenSavingsPercentile(samples, 50)),
 		P95:    roundTokenSavingsFloat(tokenSavingsPercentile(samples, 95)),
 	}
+}
+
+func buildTokenSavingsTrendSeriesFromBenchmarkRuns(
+	history []storage.SavingsBenchmarkRun,
+	generatedAt time.Time,
+	currentSavings tokenSavingsDeltaReport,
+	pricing map[string]config.SavingsCompetitorPricing,
+) map[string][]tokenSavingsTrendPoint {
+	competitors := savings.OrderedCompetitors(pricing)
+	if len(competitors) == 0 {
+		return map[string][]tokenSavingsTrendPoint{}
+	}
+
+	trends := make(map[string][]tokenSavingsTrendPoint, len(competitors))
+	for _, competitor := range competitors {
+		trends[competitor] = make([]tokenSavingsTrendPoint, 0, len(history)+1)
+		for _, run := range history {
+			score, ok := run.CompetitorScores[competitor]
+			if !ok {
+				score = storage.SavingsBenchmarkCompetitorScore{
+					TokensSaved: run.TokensSaved,
+					SavingsPct:  run.SavingsPct,
+				}
+			}
+			trends[competitor] = append(trends[competitor], tokenSavingsTrendPoint{
+				CapturedAtUTC: run.CapturedAt.UTC().Format(time.RFC3339),
+				TokensSaved:   score.TokensSaved,
+				CostSavedUSD:  roundTokenSavingsFloat(score.CostSavedUSD),
+				SavingsPct:    roundTokenSavingsFloat(score.SavingsPct),
+			})
+		}
+		currentTokensSaved := currentSavings.TokensSaved
+		if score, ok := currentSavings.Scores[competitor]; ok {
+			currentTokensSaved = score.TokensSaved
+		}
+		trends[competitor] = append(trends[competitor], tokenSavingsTrendPoint{
+			CapturedAtUTC: generatedAt.UTC().Format(time.RFC3339),
+			TokensSaved:   currentTokensSaved,
+			CostSavedUSD:  roundTokenSavingsFloat(currentSavings.CostSavedUSD[competitor]),
+			SavingsPct:    roundTokenSavingsFloat(currentSavings.SavingsPct),
+		})
+	}
+	return trends
+}
+
+func persistTokenSavingsBenchmarkRun(
+	ctx context.Context,
+	storagePath string,
+	run storage.SavingsBenchmarkRun,
+) error {
+	if strings.TrimSpace(storagePath) == "" {
+		return nil
+	}
+
+	store, err := storage.NewSQLiteTelemetryStore(storagePath)
+	if err != nil {
+		return err
+	}
+	return store.SaveSavingsBenchmarkRun(ctx, run)
+}
+
+func loadTokenSavingsHistoricalRuns(
+	ctx context.Context,
+	storagePath string,
+	filter storage.SavingsBenchmarkRunFilter,
+) ([]storage.SavingsBenchmarkRun, error) {
+	if strings.TrimSpace(storagePath) == "" {
+		return nil, nil
+	}
+
+	store, err := storage.NewSQLiteTelemetryStore(storagePath)
+	if err != nil {
+		return nil, err
+	}
+	return store.LoadSavingsBenchmarkRuns(ctx, filter)
 }
 
 func buildTokenSavingsTrendSeries(
@@ -1387,6 +1501,74 @@ func buildTokenSavingsReportRepoID(dataset string) string {
 		normalized = "fixture-corpus"
 	}
 	return fmt.Sprintf("token-savings-%s", normalized)
+}
+
+func buildTokenSavingsBenchmarkRunID(
+	dataset string,
+	suiteVersion string,
+	generatedAt time.Time,
+	provider string,
+	backend string,
+	model string,
+) string {
+	timestamp := strings.ToLower(generatedAt.UTC().Format("20060102-150405Z"))
+	parts := []string{
+		"token-savings",
+		timestamp,
+		sanitizeTagValue(dataset),
+		sanitizeTagValue(suiteVersion),
+		sanitizeTagValue(provider),
+		sanitizeTagValue(backend),
+		sanitizeTagValue(model),
+	}
+
+	filtered := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if strings.TrimSpace(part) != "" {
+			filtered = append(filtered, part)
+		}
+	}
+	return strings.Join(filtered, "-")
+}
+
+func buildTokenSavingsStoredBenchmarkRun(
+	runID string,
+	fixtures tokenSavingsFixtureSet,
+	report tokenSavingsCombinationReport,
+	benchmarkSnapshot telemetry.PersistedCumulativeSnapshot,
+) storage.SavingsBenchmarkRun {
+	competitorScores := make(map[string]storage.SavingsBenchmarkCompetitorScore, len(report.Aggregate.Savings.Scores))
+	for competitor, score := range report.Aggregate.Savings.Scores {
+		competitorScores[competitor] = storage.SavingsBenchmarkCompetitorScore{
+			TokensSaved:  score.TokensSaved,
+			CostSavedUSD: roundTokenSavingsFloat(score.CostSavedUSD),
+			SavingsPct:   roundTokenSavingsFloat(score.SavingsPct),
+		}
+	}
+
+	return storage.SavingsBenchmarkRun{
+		RunID:                  runID,
+		CapturedAt:             benchmarkSnapshot.CapturedAt.UTC(),
+		Dataset:                fixtures.Dataset,
+		SuiteVersion:           fixtures.SuiteVersion,
+		Mode:                   evalModeTokenSavings,
+		Provider:               report.Provider,
+		Backend:                report.Backend,
+		Model:                  report.Model,
+		IndexedRepo:            report.IndexedRepo,
+		FileCount:              report.FileCount,
+		CaseCount:              report.Aggregate.CaseCount,
+		WithMCPInputTokens:     report.Aggregate.WithMCP.InputTokens,
+		WithMCPOutputTokens:    report.Aggregate.WithMCP.OutputTokens,
+		WithMCPTotalTokens:     report.Aggregate.WithMCP.TotalTokens,
+		WithoutMCPInputTokens:  report.Aggregate.WithoutMCP.InputTokens,
+		WithoutMCPOutputTokens: report.Aggregate.WithoutMCP.OutputTokens,
+		WithoutMCPTotalTokens:  report.Aggregate.WithoutMCP.TotalTokens,
+		TokensSaved:            report.Aggregate.Savings.TokensSaved,
+		SavingsPct:             roundTokenSavingsFloat(report.Aggregate.Savings.SavingsPct),
+		CompetitorScores:       competitorScores,
+		TelemetrySnapshot:      benchmarkSnapshot,
+	}
 }
 
 func buildTokenSavingsRequestArguments(arguments map[string]any, repoID string) map[string]any {

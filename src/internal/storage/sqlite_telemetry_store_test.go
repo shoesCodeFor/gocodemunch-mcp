@@ -519,8 +519,8 @@ func TestSQLiteTelemetryStoreMigratesLegacySnapshotOnlySchema(t *testing.T) {
 	).Scan(&schemaVersion); err != nil {
 		t.Fatalf("read migrated schema version: %v", err)
 	}
-	if schemaVersion != "2" {
-		t.Fatalf("expected schema_version 2 after migration, got %q", schemaVersion)
+	if schemaVersion != "3" {
+		t.Fatalf("expected schema_version 3 after migration, got %q", schemaVersion)
 	}
 
 	var callEventTableCount int
@@ -627,8 +627,8 @@ func TestSQLiteTelemetryStoreMigratesExplicitSchemaVersionOne(t *testing.T) {
 	).Scan(&schemaVersion); err != nil {
 		t.Fatalf("read versioned migrated schema version: %v", err)
 	}
-	if schemaVersion != "2" {
-		t.Fatalf("expected schema_version 2 after versioned migration, got %q", schemaVersion)
+	if schemaVersion != "3" {
+		t.Fatalf("expected schema_version 3 after versioned migration, got %q", schemaVersion)
 	}
 
 	if err := store.SaveCallEvents(context.Background(), []telemetry.PersistedCallEvent{
@@ -902,5 +902,125 @@ func TestSQLiteTelemetryStorePreservesPricingProfileVersionOnSnapshotAndCallEven
 	}
 	if loadedEvents[0].PricingProfileVersion != "pricing-v2026-05-01" {
 		t.Fatalf("expected call event pricing profile version to round-trip, got %#v", loadedEvents)
+	}
+}
+
+func TestSQLiteTelemetryStoreSaveAndLoadSavingsBenchmarkRunsIdempotently(t *testing.T) {
+	now := time.Date(2026, 5, 3, 14, 0, 0, 0, time.UTC)
+	store, err := NewSQLiteTelemetryStoreWithOptions(t.TempDir(), SQLiteTelemetryStoreOptions{
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("create telemetry store: %v", err)
+	}
+
+	run := SavingsBenchmarkRun{
+		RunID:                  "token-savings-20260503-140000z-suite-ollama-sqlite-model-a",
+		CapturedAt:             now,
+		Dataset:                "token-savings-suite",
+		SuiteVersion:           "v1",
+		Mode:                   "token-savings-smoke",
+		Provider:               "ollama",
+		Backend:                "sqlite",
+		Model:                  "model-a",
+		IndexedRepo:            "token-savings-token-savings-suite",
+		FileCount:              4,
+		CaseCount:              5,
+		WithMCPInputTokens:     120,
+		WithMCPOutputTokens:    60,
+		WithMCPTotalTokens:     180,
+		WithoutMCPInputTokens:  220,
+		WithoutMCPOutputTokens: 0,
+		WithoutMCPTotalTokens:  220,
+		TokensSaved:            40,
+		SavingsPct:             0.181818,
+		CompetitorScores: map[string]SavingsBenchmarkCompetitorScore{
+			"claude_code": {TokensSaved: 40, CostSavedUSD: 0.024, SavingsPct: 0.181818},
+			"codex":       {TokensSaved: 40, CostSavedUSD: 0.012, SavingsPct: 0.181818},
+			"amp":         {TokensSaved: 40, CostSavedUSD: 0.012, SavingsPct: 0.181818},
+		},
+		TelemetrySnapshot: telemetry.PersistedCumulativeSnapshot{
+			CapturedAt: now,
+			Cumulative: telemetry.CumulativeSnapshot{
+				SessionCount: 1,
+				CallCount:    5,
+				TotalTokens:  180,
+				TokensSaved:  180,
+				ToolBreakdown: map[string]telemetry.ToolSnapshot{
+					"search_text": {CallCount: 5, TotalTokens: 180, TokensSaved: 180},
+				},
+			},
+		},
+	}
+
+	if err := store.SaveSavingsBenchmarkRun(context.Background(), run); err != nil {
+		t.Fatalf("save benchmark run: %v", err)
+	}
+
+	run.TokensSaved = 44
+	run.SavingsPct = 0.2
+	run.CompetitorScores["codex"] = SavingsBenchmarkCompetitorScore{
+		TokensSaved:  44,
+		CostSavedUSD: 0.0132,
+		SavingsPct:   0.2,
+	}
+	if err := store.SaveSavingsBenchmarkRun(context.Background(), run); err != nil {
+		t.Fatalf("upsert benchmark run: %v", err)
+	}
+
+	loaded, err := store.LoadSavingsBenchmarkRuns(context.Background(), SavingsBenchmarkRunFilter{
+		Dataset:      "token-savings-suite",
+		SuiteVersion: "v1",
+		Mode:         "token-savings-smoke",
+		Provider:     "ollama",
+		Backend:      "sqlite",
+		Model:        "model-a",
+	})
+	if err != nil {
+		t.Fatalf("load benchmark runs: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected one benchmark run after idempotent upsert, got %#v", loaded)
+	}
+	if loaded[0].RunID != run.RunID || loaded[0].TokensSaved != 44 || loaded[0].SavingsPct != 0.2 {
+		t.Fatalf("unexpected loaded benchmark run: %#v", loaded[0])
+	}
+	if score := loaded[0].CompetitorScores["codex"]; score.CostSavedUSD != 0.0132 || score.TokensSaved != 44 {
+		t.Fatalf("expected updated codex score after upsert, got %#v", loaded[0].CompetitorScores)
+	}
+
+	db, err := store.openDB()
+	if err != nil {
+		t.Fatalf("open telemetry db for benchmark assertions: %v", err)
+	}
+	defer db.Close()
+
+	var benchmarkRunCount int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM savings_benchmark_runs WHERE run_id = ?`, run.RunID).Scan(&benchmarkRunCount); err != nil {
+		t.Fatalf("count savings benchmark runs: %v", err)
+	}
+	if benchmarkRunCount != 1 {
+		t.Fatalf("expected one persisted savings benchmark run row, got %d", benchmarkRunCount)
+	}
+
+	var competitorCount int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM savings_benchmark_competitors WHERE run_id = ?`, run.RunID).Scan(&competitorCount); err != nil {
+		t.Fatalf("count savings benchmark competitors: %v", err)
+	}
+	if competitorCount != 3 {
+		t.Fatalf("expected three persisted competitor rows, got %d", competitorCount)
+	}
+
+	var benchmarkSnapshotCount int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM cumulative_snapshots WHERE benchmark_run_id = ?`, run.RunID).Scan(&benchmarkSnapshotCount); err != nil {
+		t.Fatalf("count benchmark-linked telemetry snapshots: %v", err)
+	}
+	if benchmarkSnapshotCount != 1 {
+		t.Fatalf("expected exactly one benchmark-linked telemetry snapshot row, got %d", benchmarkSnapshotCount)
+	}
+
+	_, err = store.LoadLatestSnapshot(context.Background())
+	if !errors.Is(err, telemetry.ErrSnapshotNotFound) {
+		t.Fatalf("expected benchmark-linked snapshots to be excluded from latest runtime snapshot loads, got %v", err)
 	}
 }
