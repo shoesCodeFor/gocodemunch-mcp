@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -13,6 +14,7 @@ type tokenSavingsPromptSuiteFixture struct {
 	Cases        []struct {
 		ID           string         `json:"id"`
 		Prompt       string         `json:"prompt"`
+		Modes        []string       `json:"modes"`
 		Tool         string         `json:"tool"`
 		Arguments    map[string]any `json:"arguments"`
 		ContextFiles []string       `json:"context_files"`
@@ -54,10 +56,14 @@ func TestTokenSavingsFixturesAreDeterministicAndInternallyConsistent(t *testing.
 		t.Fatalf("expected 5 token savings cases, got %d", got)
 	}
 
+	expectedModes := []string{"with_mcp", "without_mcp"}
 	caseIDs := make(map[string]struct{}, len(suite.Cases))
 	for _, benchmarkCase := range suite.Cases {
 		if benchmarkCase.ID == "" || benchmarkCase.Prompt == "" || benchmarkCase.Tool == "" {
 			t.Fatalf("token savings case fields must be non-empty: %#v", benchmarkCase)
+		}
+		if !reflect.DeepEqual(benchmarkCase.Modes, expectedModes) {
+			t.Fatalf("token savings case %q must declare deterministic modes %v, got %#v", benchmarkCase.ID, expectedModes, benchmarkCase.Modes)
 		}
 		if len(benchmarkCase.ContextFiles) == 0 {
 			t.Fatalf("token savings case must include context files: %#v", benchmarkCase)

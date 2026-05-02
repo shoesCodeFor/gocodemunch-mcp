@@ -24,6 +24,8 @@ const (
 	defaultTokenSavingsOutputPath    = "Auto Run Docs/Working/evals/token-savings-smoke.json"
 	tokenSavingsPromptSuiteFileName  = "prompt_suite.json"
 	serializedBytesPerEstimatedToken = 4.0
+	tokenSavingsModeWithMCP          = "with_mcp"
+	tokenSavingsModeWithoutMCP       = "without_mcp"
 )
 
 var tokenSavingsSupportedTools = map[string]struct{}{
@@ -32,6 +34,11 @@ var tokenSavingsSupportedTools = map[string]struct{}{
 	"search_text":      {},
 	"find_importers":   {},
 	"find_references":  {},
+}
+
+var tokenSavingsRequiredModes = []string{
+	tokenSavingsModeWithMCP,
+	tokenSavingsModeWithoutMCP,
 }
 
 type tokenSavingsPromptSuiteFile struct {
@@ -43,6 +50,7 @@ type tokenSavingsPromptSuiteFile struct {
 type tokenSavingsCaseFixture struct {
 	ID           string         `json:"id"`
 	Prompt       string         `json:"prompt"`
+	Modes        []string       `json:"modes"`
 	Tool         string         `json:"tool"`
 	Arguments    map[string]any `json:"arguments"`
 	ContextFiles []string       `json:"context_files"`
@@ -71,6 +79,7 @@ type tokenSavingsSmokeReport struct {
 type tokenSavingsCaseReport struct {
 	ID            string                      `json:"id"`
 	Prompt        string                      `json:"prompt"`
+	Modes         []string                    `json:"modes"`
 	Tool          string                      `json:"tool"`
 	ToolArguments map[string]any              `json:"tool_arguments"`
 	ContextFiles  []string                    `json:"context_files"`
@@ -186,49 +195,61 @@ func runTokenSavingsSmokeMode(
 	totalWithoutInput := 0
 
 	for _, benchmarkCase := range fixtures.Cases {
-		toolArgs := cloneAnyMap(benchmarkCase.Arguments)
-		toolArgs["repo"] = repoID
-		response := service.CallTool(ctx, benchmarkCase.Tool, toolArgs)
-		if errMsg := payloadError(response); errMsg != "" {
-			return tokenSavingsSmokeReport{}, fmt.Errorf("run case %q via %s: %s", benchmarkCase.ID, benchmarkCase.Tool, errMsg)
-		}
-
-		withRequestTokens := estimateSerializedTokensForReport(map[string]any{
-			"name": benchmarkCase.Tool,
-			"arguments": buildTokenSavingsRequestArguments(
-				benchmarkCase.Arguments,
-				reportedRepoID,
-			),
-		})
-		withResponseTokens := estimateSerializedTokensForReport(
-			canonicalizeTokenSavingsResponsePayload(response),
-		)
+		enabledModes := buildTokenSavingsModeSet(benchmarkCase.Modes)
 		promptTokens := estimateSerializedTokensForReport(map[string]any{
 			"prompt": benchmarkCase.Prompt,
 		})
-		contextPayload := buildWithoutMCPInputPayload(benchmarkCase.Prompt, benchmarkCase.ContextFiles, documentsByPath)
-		contextOnlyTokens := estimateSerializedTokensForReport(map[string]any{
-			"context_files": contextPayload["context_files"],
-		})
-		withoutInputTokens := estimateSerializedTokensForReport(contextPayload)
-		withInputTokens := promptTokens + withRequestTokens
 
-		withMode := tokenSavingsModeCaseMetrics{
-			InputTokens:        withInputTokens,
-			OutputTokens:       withResponseTokens,
-			TotalTokens:        withInputTokens + withResponseTokens,
-			ToolRequestTokens:  withRequestTokens,
-			ToolResponseTokens: withResponseTokens,
-			CostUSD:            savings.CostsForTokens(pricing, withInputTokens, withResponseTokens),
+		withMode := tokenSavingsModeCaseMetrics{}
+		if _, ok := enabledModes[tokenSavingsModeWithMCP]; ok {
+			toolArgs := cloneAnyMap(benchmarkCase.Arguments)
+			toolArgs["repo"] = repoID
+			response := service.CallTool(ctx, benchmarkCase.Tool, toolArgs)
+			if errMsg := payloadError(response); errMsg != "" {
+				return tokenSavingsSmokeReport{}, fmt.Errorf("run case %q via %s: %s", benchmarkCase.ID, benchmarkCase.Tool, errMsg)
+			}
+
+			withRequestTokens := estimateSerializedTokensForReport(map[string]any{
+				"name": benchmarkCase.Tool,
+				"arguments": buildTokenSavingsRequestArguments(
+					benchmarkCase.Arguments,
+					reportedRepoID,
+				),
+			})
+			withResponseTokens := estimateSerializedTokensForReport(
+				canonicalizeTokenSavingsResponsePayload(response),
+			)
+			withInputTokens := promptTokens + withRequestTokens
+			withMode = tokenSavingsModeCaseMetrics{
+				InputTokens:        withInputTokens,
+				OutputTokens:       withResponseTokens,
+				TotalTokens:        withInputTokens + withResponseTokens,
+				ToolRequestTokens:  withRequestTokens,
+				ToolResponseTokens: withResponseTokens,
+				CostUSD:            savings.CostsForTokens(pricing, withInputTokens, withResponseTokens),
+			}
+			totalWithInput += withMode.InputTokens
+			totalWithOutput += withMode.OutputTokens
 		}
-		withoutMode := tokenSavingsModeCaseMetrics{
-			InputTokens:   withoutInputTokens,
-			OutputTokens:  0,
-			TotalTokens:   withoutInputTokens,
-			ContextTokens: contextOnlyTokens,
-			CostUSD:       savings.CostsForTokens(pricing, withoutInputTokens, 0),
+
+		withoutMode := tokenSavingsModeCaseMetrics{}
+		if _, ok := enabledModes[tokenSavingsModeWithoutMCP]; ok {
+			contextPayload := buildWithoutMCPInputPayload(benchmarkCase.Prompt, benchmarkCase.ContextFiles, documentsByPath)
+			contextOnlyTokens := estimateSerializedTokensForReport(map[string]any{
+				"context_files": contextPayload["context_files"],
+			})
+			withoutInputTokens := estimateSerializedTokensForReport(contextPayload)
+			withoutMode = tokenSavingsModeCaseMetrics{
+				InputTokens:   withoutInputTokens,
+				OutputTokens:  0,
+				TotalTokens:   withoutInputTokens,
+				ContextTokens: contextOnlyTokens,
+				CostUSD:       savings.CostsForTokens(pricing, withoutInputTokens, 0),
+			}
+			totalWithoutInput += withoutMode.InputTokens
 		}
-		savings := tokenSavingsDeltaReport{
+
+		savingsReport := tokenSavingsDeltaReport{
 			TokensSaved:  withoutMode.TotalTokens - withMode.TotalTokens,
 			SavingsPct:   savingsRatio(withoutMode.TotalTokens, withoutMode.TotalTokens-withMode.TotalTokens),
 			CostSavedUSD: savings.DiffCostMap(withoutMode.CostUSD, withMode.CostUSD, pricing),
@@ -237,17 +258,14 @@ func runTokenSavingsSmokeMode(
 		caseReports = append(caseReports, tokenSavingsCaseReport{
 			ID:            benchmarkCase.ID,
 			Prompt:        benchmarkCase.Prompt,
+			Modes:         append([]string(nil), benchmarkCase.Modes...),
 			Tool:          benchmarkCase.Tool,
 			ToolArguments: cloneAnyMap(benchmarkCase.Arguments),
 			ContextFiles:  append([]string(nil), benchmarkCase.ContextFiles...),
 			WithMCP:       withMode,
 			WithoutMCP:    withoutMode,
-			Savings:       savings,
+			Savings:       savingsReport,
 		})
-
-		totalWithInput += withMode.InputTokens
-		totalWithOutput += withMode.OutputTokens
-		totalWithoutInput += withoutMode.InputTokens
 	}
 
 	aggregateWith := tokenSavingsModeAggregateMetrics{
@@ -359,6 +377,11 @@ func loadTokenSavingsFixtures(dir string) (tokenSavingsFixtureSet, error) {
 		if len(benchmarkCase.ContextFiles) == 0 {
 			return tokenSavingsFixtureSet{}, fmt.Errorf("token savings case %q must include at least one context file", benchmarkCase.ID)
 		}
+		normalizedModes, err := normalizeTokenSavingsModes(benchmarkCase.Modes)
+		if err != nil {
+			return tokenSavingsFixtureSet{}, fmt.Errorf("normalize token savings case %q modes: %w", benchmarkCase.ID, err)
+		}
+		benchmarkCase.Modes = normalizedModes
 		if benchmarkCase.Arguments == nil {
 			benchmarkCase.Arguments = map[string]any{}
 		}
@@ -385,6 +408,56 @@ func loadTokenSavingsFixtures(dir string) (tokenSavingsFixtureSet, error) {
 		Documents:    corpus.Documents,
 		Cases:        suite.Cases,
 	}, nil
+}
+
+func normalizeTokenSavingsModes(rawModes []string) ([]string, error) {
+	if len(rawModes) == 0 {
+		return nil, errors.New("modes must be non-empty")
+	}
+
+	seen := make(map[string]struct{}, len(rawModes))
+	for _, rawMode := range rawModes {
+		mode := strings.ToLower(strings.TrimSpace(rawMode))
+		if mode == "" {
+			return nil, errors.New("mode must be non-empty")
+		}
+		if !isSupportedTokenSavingsMode(mode) {
+			return nil, fmt.Errorf("unsupported mode %q", rawMode)
+		}
+		if _, exists := seen[mode]; exists {
+			return nil, fmt.Errorf("duplicate mode %q", mode)
+		}
+		seen[mode] = struct{}{}
+	}
+
+	for _, requiredMode := range tokenSavingsRequiredModes {
+		if _, ok := seen[requiredMode]; !ok {
+			return nil, fmt.Errorf("must include %q", requiredMode)
+		}
+	}
+
+	normalized := make([]string, 0, len(tokenSavingsRequiredModes))
+	for _, requiredMode := range tokenSavingsRequiredModes {
+		normalized = append(normalized, requiredMode)
+	}
+	return normalized, nil
+}
+
+func buildTokenSavingsModeSet(modes []string) map[string]struct{} {
+	modeSet := make(map[string]struct{}, len(modes))
+	for _, mode := range modes {
+		modeSet[mode] = struct{}{}
+	}
+	return modeSet
+}
+
+func isSupportedTokenSavingsMode(mode string) bool {
+	switch strings.TrimSpace(mode) {
+	case tokenSavingsModeWithMCP, tokenSavingsModeWithoutMCP:
+		return true
+	default:
+		return false
+	}
 }
 
 func materializeTokenSavingsCorpus(documents []fixtureDocument) (string, func(), error) {

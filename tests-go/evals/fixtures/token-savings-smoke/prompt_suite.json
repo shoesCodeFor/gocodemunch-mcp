@@ -5,6 +5,10 @@
     {
       "id": "tree-app-files",
       "prompt": "Show me the indexed files under the app folder.",
+      "modes": [
+        "with_mcp",
+        "without_mcp"
+      ],
       "tool": "get_file_tree",
       "arguments": {
         "path_prefix": "app"
@@ -19,6 +23,10 @@
     {
       "id": "outline-http-client",
       "prompt": "Outline the HTTP client implementation.",
+      "modes": [
+        "with_mcp",
+        "without_mcp"
+      ],
       "tool": "get_file_outline",
       "arguments": {
         "file_path": "pkg/http_client.py"
@@ -31,6 +39,10 @@
     {
       "id": "importers-http-client",
       "prompt": "Which files import the HTTP client module?",
+      "modes": [
+        "with_mcp",
+        "without_mcp"
+      ],
       "tool": "find_importers",
       "arguments": {
         "file_path": "pkg/http_client.py",
@@ -46,6 +58,10 @@
     {
       "id": "references-load-config",
       "prompt": "Find references to load_config.",
+      "modes": [
+        "with_mcp",
+        "without_mcp"
+      ],
       "tool": "find_references",
       "arguments": {
         "identifier": "load_config",
@@ -61,6 +77,10 @@
     {
       "id": "search-timeout-seconds",
       "prompt": "Find the timeout_seconds usage.",
+      "modes": [
+        "with_mcp",
+        "without_mcp"
+      ],
       "tool": "search_text",
       "arguments": {
         "query": "timeout_seconds",

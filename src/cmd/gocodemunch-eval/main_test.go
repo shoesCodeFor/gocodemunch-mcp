@@ -238,6 +238,7 @@ func TestRunWithArgsTokenSavingsSmokeEmitsSavingsReport(t *testing.T) {
 			{
 				ID:     "tree-app-files",
 				Prompt: "Show me the indexed files under the app folder.",
+				Modes:  append([]string(nil), tokenSavingsRequiredModes...),
 				Tool:   "get_file_tree",
 				Arguments: map[string]any{
 					"path_prefix": "app",
@@ -247,6 +248,7 @@ func TestRunWithArgsTokenSavingsSmokeEmitsSavingsReport(t *testing.T) {
 			{
 				ID:     "outline-http-client",
 				Prompt: "Outline the HTTP client implementation.",
+				Modes:  append([]string(nil), tokenSavingsRequiredModes...),
 				Tool:   "get_file_outline",
 				Arguments: map[string]any{
 					"file_path": "pkg/http_client.py",
@@ -256,6 +258,7 @@ func TestRunWithArgsTokenSavingsSmokeEmitsSavingsReport(t *testing.T) {
 			{
 				ID:     "importers-http-client",
 				Prompt: "Which files import the HTTP client module?",
+				Modes:  append([]string(nil), tokenSavingsRequiredModes...),
 				Tool:   "find_importers",
 				Arguments: map[string]any{
 					"file_path":   "pkg/http_client.py",
@@ -266,6 +269,7 @@ func TestRunWithArgsTokenSavingsSmokeEmitsSavingsReport(t *testing.T) {
 			{
 				ID:     "search-timeout-seconds",
 				Prompt: "Find the timeout_seconds usage.",
+				Modes:  append([]string(nil), tokenSavingsRequiredModes...),
 				Tool:   "search_text",
 				Arguments: map[string]any{
 					"query":         "timeout_seconds",
@@ -348,6 +352,9 @@ func TestRunWithArgsTokenSavingsSmokeEmitsSavingsReport(t *testing.T) {
 	}
 
 	for _, row := range report.Cases {
+		if !reflect.DeepEqual(row.Modes, tokenSavingsRequiredModes) {
+			t.Fatalf("expected explicit with/without modes for %q, got %#v", row.ID, row.Modes)
+		}
 		if row.WithMCP.TotalTokens >= row.WithoutMCP.TotalTokens {
 			t.Fatalf("expected per-case savings for %q, got %#v", row.ID, row)
 		}
@@ -1324,6 +1331,7 @@ func writeTokenSavingsMarkdownFixtures(t *testing.T) string {
 			{
 				ID:     "search-timeout-default",
 				Prompt: "Find where the default timeout constant is defined.",
+				Modes:  append([]string(nil), tokenSavingsRequiredModes...),
 				Tool:   "search_text",
 				Arguments: map[string]any{
 					"query":         "DEFAULT_TIMEOUT_SECONDS",
