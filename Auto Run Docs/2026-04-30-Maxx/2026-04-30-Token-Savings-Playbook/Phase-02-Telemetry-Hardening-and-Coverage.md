@@ -45,7 +45,10 @@ This phase hardens the prototype into reliable runtime infrastructure by coverin
   - Completed in loop `00001`: added an MCP wire-contract test in `src/server` covering `trend_windows`, `session_rollups`, `total_rollups`, and legacy `get_session_stats` keys against a seeded SQLite telemetry store.
   - Completed in loop `00001`: verified with `go test ./src/internal/storage ./src/internal/orchestration ./src/server ./tests-go -count=1` and `go vet ./src/internal/storage ./src/internal/orchestration ./src/server ./tests-go`.
 
-- [ ] Run hardening verification and performance checks:
+- [x] Run hardening verification and performance checks:
   - Run targeted test suites for telemetry/storage/orchestration and existing parity integration tests.
   - Execute a local stress pass (high call count) to confirm persistence cadence and retention behave correctly.
   - Fix regressions until telemetry remains accurate under normal and degraded conditions.
+  - Completed in loop `00001`: added `TestSQLiteTelemetryStoreSoakPersistsFlushCadenceAndCompactsRetention` to drive 2,560 SQLite-backed telemetry calls across periodic flush intervals, then verify cumulative snapshots continue advancing while 2-hour retention compaction removes 512 stale events and preserves 2,048 fresh events.
+  - Completed in loop `00001`: verified with `go test ./src/internal/telemetry ./src/internal/storage ./src/internal/orchestration ./src/server ./tests-go -count=1`, `go test ./src/cmd/gocodemunch-parity -count=1`, `go vet ./src/internal/telemetry ./src/internal/storage ./src/internal/orchestration ./src/server ./tests-go ./src/cmd/gocodemunch-parity`, and `go test ./src/internal/storage -run TestSQLiteTelemetryStoreSoakPersistsFlushCadenceAndCompactsRetention -count=3`.
+  - Completed in loop `00001`: ran `RUN_ID=run-20260501T2259Z-phase02-telemetry-hardening RACE_REPEAT=1 STRESS_REPEAT=3 ./scripts/run-wp10-race.sh` with passing watcher/orchestration/integration stress logs under `specs/go-migration/artifacts/race/run-20260501T2259Z-phase02-telemetry-hardening`.

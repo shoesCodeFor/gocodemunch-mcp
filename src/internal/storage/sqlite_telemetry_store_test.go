@@ -241,6 +241,136 @@ func TestSQLiteTelemetryStorePersistsPeriodicRuntimeSnapshots(t *testing.T) {
 	}
 }
 
+func TestSQLiteTelemetryStoreSoakPersistsFlushCadenceAndCompactsRetention(t *testing.T) {
+	currentTime := time.Date(2026, 5, 3, 16, 0, 0, 0, time.UTC)
+	store, err := NewSQLiteTelemetryStoreWithOptions(t.TempDir(), SQLiteTelemetryStoreOptions{
+		CallEventRetention: 2 * time.Hour,
+		Now: func() time.Time {
+			return currentTime
+		},
+	})
+	if err != nil {
+		t.Fatalf("create telemetry store: %v", err)
+	}
+
+	runtime, err := telemetry.NewRuntime(telemetry.RuntimeConfig{
+		Pricing: map[string]telemetry.Pricing{
+			"codex": {InputUSDPerMTok: 1.5, OutputUSDPerMTok: 6},
+		},
+		PricingProfileVersion: "pricing-v2026-05-01",
+		Store:                 store,
+		SnapshotInterval:      5 * time.Millisecond,
+		Now: func() time.Time {
+			return currentTime
+		},
+	})
+	if err != nil {
+		t.Fatalf("create runtime: %v", err)
+	}
+
+	const (
+		staleCalls = 512
+		freshCalls = 2048
+		batchSize  = 64
+	)
+	totalCalls := staleCalls + freshCalls
+
+	for start := 0; start < totalCalls; start += batchSize {
+		end := start + batchSize
+		if end > totalCalls {
+			end = totalCalls
+		}
+
+		for i := start; i < end; i++ {
+			finishedAt := currentTime.Add(-30 * time.Minute)
+			toolName := "fresh_tool"
+			if i < staleCalls {
+				finishedAt = currentTime.Add(-4 * time.Hour)
+				toolName = "stale_tool"
+			}
+
+			runtime.RecordCall(telemetry.CallRecord{
+				ToolName:          toolName,
+				StartedAt:         finishedAt.Add(-2 * time.Millisecond),
+				FinishedAt:        finishedAt,
+				RequestTokens:     3,
+				ResponseTokens:    2,
+				InputTokensSaved:  1,
+				OutputTokensSaved: 1,
+			})
+		}
+
+		time.Sleep(7 * time.Millisecond)
+	}
+
+	time.Sleep(30 * time.Millisecond)
+	if err := runtime.Close(); err != nil {
+		t.Fatalf("close runtime: %v", err)
+	}
+
+	loaded, err := store.LoadLatestSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("load latest telemetry snapshot after soak: %v", err)
+	}
+	if loaded.Cumulative.CallCount != totalCalls {
+		t.Fatalf("expected cumulative call count %d after soak, got %#v", totalCalls, loaded)
+	}
+	if loaded.Cumulative.SessionCount != 1 {
+		t.Fatalf("expected one telemetry session after soak, got %#v", loaded.Cumulative)
+	}
+
+	db, err := store.openDB()
+	if err != nil {
+		t.Fatalf("open telemetry db after soak: %v", err)
+	}
+	defer db.Close()
+
+	var snapshotCount int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM cumulative_snapshots`).Scan(&snapshotCount); err != nil {
+		t.Fatalf("count cumulative snapshots after soak: %v", err)
+	}
+	if snapshotCount < 2 {
+		t.Fatalf("expected periodic flush cadence plus final flush, got %d snapshots", snapshotCount)
+	}
+
+	var retainedCount int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM call_events`).Scan(&retainedCount); err != nil {
+		t.Fatalf("count retained call events after soak: %v", err)
+	}
+	if retainedCount != freshCalls {
+		t.Fatalf("expected only fresh retained call events (%d), got %d", freshCalls, retainedCount)
+	}
+
+	var staleCount int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM call_events WHERE tool_name = 'stale_tool'`).Scan(&staleCount); err != nil {
+		t.Fatalf("count stale retained call events after soak: %v", err)
+	}
+	if staleCount != 0 {
+		t.Fatalf("expected retention compaction to delete stale call events, got %d", staleCount)
+	}
+
+	var freshCount int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM call_events WHERE tool_name = 'fresh_tool'`).Scan(&freshCount); err != nil {
+		t.Fatalf("count fresh retained call events after soak: %v", err)
+	}
+	if freshCount != freshCalls {
+		t.Fatalf("expected fresh retained call count %d, got %d", freshCalls, freshCount)
+	}
+
+	events, err := store.LoadCallEvents(context.Background(), currentTime.Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("load retained call events after soak: %v", err)
+	}
+	if len(events) != freshCalls {
+		t.Fatalf("expected %d retained call events after soak, got %d", freshCalls, len(events))
+	}
+	for _, event := range events {
+		if event.Call.ToolName != "fresh_tool" {
+			t.Fatalf("expected only fresh_tool retained events after compaction, got %#v", event)
+		}
+	}
+}
+
 func TestSQLiteTelemetryStoreMigratesLegacySnapshotOnlySchema(t *testing.T) {
 	root := t.TempDir()
 	store, err := NewSQLiteTelemetryStore(root)
