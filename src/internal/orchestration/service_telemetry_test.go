@@ -544,6 +544,65 @@ func TestGetSessionStatsReturnsRequestedTrendWindowsFromPersistedTelemetry(t *te
 	}
 }
 
+func TestGetSessionStatsFallsBackToLiveTelemetryWhenPersistenceFails(t *testing.T) {
+	now := time.Date(2026, 5, 1, 21, 0, 0, 0, time.UTC)
+	runtime, err := telemetry.NewRuntime(telemetry.RuntimeConfig{
+		Pricing: testTelemetryPricing(),
+		Store: &failingTelemetryRuntimeStore{
+			saveSnapshotErr: errors.New("sqlite snapshots unavailable"),
+			saveCallErr:     errors.New("sqlite call events unavailable"),
+			loadCallErr:     errors.New("sqlite trends unavailable"),
+		},
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("create telemetry runtime with failing persistence: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = runtime.Close()
+	})
+
+	service := New(testTelemetryConfig(), Dependencies{Telemetry: runtime})
+	service.tools["telemetry_probe"] = Tool{
+		Name:        "telemetry_probe",
+		Description: "test-only telemetry probe",
+		InputSchema: objectSchema(map[string]any{}),
+		Handler: func(_ context.Context, _ map[string]any) (map[string]any, error) {
+			return map[string]any{"ok": true}, nil
+		},
+	}
+
+	probe := service.CallTool(context.Background(), "telemetry_probe", map[string]any{})
+	if ok, _ := probe["ok"].(bool); !ok {
+		t.Fatalf("expected tool response to succeed while telemetry persistence is unavailable, got %#v", probe)
+	}
+	probeMeta := mustMetaMap(t, probe)
+	if got := intFieldFromAny(t, probeMeta["tokens_saved"]); got <= 0 {
+		t.Fatalf("expected live telemetry meta on successful probe, got %#v", probeMeta)
+	}
+
+	if err := runtime.Flush(context.Background()); err == nil {
+		t.Fatal("expected telemetry flush to fail while persistence is unavailable")
+	}
+
+	stats := service.CallTool(context.Background(), "get_session_stats", map[string]any{
+		"trend_windows": []any{"last_24h"},
+	})
+	if got := intFieldFromAny(t, stats["session_calls"]); got != 2 {
+		t.Fatalf("expected live session telemetry to survive persistence failure, got %#v", stats)
+	}
+	if got := intFieldFromAny(t, stats["total_calls"]); got != 2 {
+		t.Fatalf("expected cumulative telemetry to remain available after flush failure, got %#v", stats)
+	}
+	if trends, ok := stats["trend_windows"].(map[string]telemetry.TrendWindowSnapshot); !ok || len(trends) != 0 {
+		t.Fatalf("expected trend query failures to degrade to empty trend_windows, got %#v", stats["trend_windows"])
+	}
+	meta := mustMetaMap(t, stats)
+	if got := intFieldFromAny(t, meta["tokens_saved"]); got <= 0 {
+		t.Fatalf("expected get_session_stats _meta to be preserved after persistence failure, got %#v", meta)
+	}
+}
+
 func TestEstimateSerializedTokensHandlesMarshalErrorsAndRoundsUp(t *testing.T) {
 	if got := estimateSerializedTokens("abcd"); got != 2 {
 		t.Fatalf("expected quoted string to round up to 2 tokens, got %d", got)
@@ -666,4 +725,37 @@ func (panicTelemetryCollector) SessionSnapshot() telemetry.SessionSnapshot {
 
 func (panicTelemetryCollector) CumulativeSnapshot() telemetry.CumulativeSnapshot {
 	panic("cumulative snapshot panic")
+}
+
+type failingTelemetryRuntimeStore struct {
+	saveSnapshotErr error
+	saveCallErr     error
+	loadCallErr     error
+}
+
+func (s *failingTelemetryRuntimeStore) LoadLatestSnapshot(
+	context.Context,
+) (telemetry.PersistedCumulativeSnapshot, error) {
+	return telemetry.PersistedCumulativeSnapshot{}, telemetry.ErrSnapshotNotFound
+}
+
+func (s *failingTelemetryRuntimeStore) SaveSnapshot(
+	context.Context,
+	telemetry.PersistedCumulativeSnapshot,
+) error {
+	return s.saveSnapshotErr
+}
+
+func (s *failingTelemetryRuntimeStore) SaveCallEvents(
+	context.Context,
+	[]telemetry.PersistedCallEvent,
+) error {
+	return s.saveCallErr
+}
+
+func (s *failingTelemetryRuntimeStore) LoadCallEvents(
+	context.Context,
+	time.Time,
+) ([]telemetry.PersistedCallEvent, error) {
+	return nil, s.loadCallErr
 }

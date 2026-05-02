@@ -347,6 +347,140 @@ func TestSQLiteTelemetryStoreMigratesLegacySnapshotOnlySchema(t *testing.T) {
 	}
 }
 
+func TestSQLiteTelemetryStoreMigratesExplicitSchemaVersionOne(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewSQLiteTelemetryStore(root)
+	if err != nil {
+		t.Fatalf("create telemetry store: %v", err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	legacyDB, err := sql.Open("sqlite", store.DBPath())
+	if err != nil {
+		t.Fatalf("open versioned legacy telemetry db: %v", err)
+	}
+
+	legacyStatements := []string{
+		`CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)`,
+		`INSERT INTO meta(key, value) VALUES('schema_version', '1')`,
+		`CREATE TABLE cumulative_snapshots (
+			snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+			captured_at TEXT NOT NULL,
+			payload TEXT NOT NULL
+		)`,
+	}
+	for _, statement := range legacyStatements {
+		if _, err := legacyDB.Exec(statement); err != nil {
+			t.Fatalf("seed versioned legacy telemetry schema: %v", err)
+		}
+	}
+
+	expected := telemetry.PersistedCumulativeSnapshot{
+		CapturedAt: now.Add(-time.Minute),
+		Cumulative: telemetry.CumulativeSnapshot{
+			FirstRecordedAt:   now.Add(-2 * time.Hour),
+			LastRecordedAt:    now.Add(-time.Minute),
+			SessionCount:      3,
+			CallCount:         6,
+			RequestTokens:     180,
+			ResponseTokens:    60,
+			TotalTokens:       240,
+			InputTokensSaved:  40,
+			OutputTokensSaved: 20,
+			TokensSaved:       60,
+			CostAvoidedUSD:    map[string]float64{"codex": 0.00018},
+			ToolBreakdown: map[string]telemetry.ToolSnapshot{
+				"seeded_tool": {
+					CallCount:      6,
+					RequestTokens:  180,
+					ResponseTokens: 60,
+					TotalTokens:    240,
+					TokensSaved:    60,
+					CostAvoidedUSD: map[string]float64{"codex": 0.00018},
+				},
+			},
+		},
+	}
+	payload, err := json.Marshal(expected)
+	if err != nil {
+		t.Fatalf("marshal versioned legacy payload: %v", err)
+	}
+	if _, err := legacyDB.Exec(
+		`INSERT INTO cumulative_snapshots(captured_at, payload) VALUES(?, ?)`,
+		expected.CapturedAt.Format(time.RFC3339Nano),
+		string(payload),
+	); err != nil {
+		t.Fatalf("insert versioned legacy telemetry snapshot: %v", err)
+	}
+	if err := legacyDB.Close(); err != nil {
+		t.Fatalf("close versioned legacy telemetry db: %v", err)
+	}
+
+	loaded, err := store.LoadLatestSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("load migrated versioned telemetry snapshot: %v", err)
+	}
+	if loaded.CapturedAt != expected.CapturedAt {
+		t.Fatalf("expected migrated captured_at %s, got %#v", expected.CapturedAt, loaded)
+	}
+	if loaded.Cumulative.CallCount != expected.Cumulative.CallCount ||
+		loaded.Cumulative.TokensSaved != expected.Cumulative.TokensSaved {
+		t.Fatalf("unexpected migrated versioned cumulative snapshot: %#v", loaded.Cumulative)
+	}
+
+	migratedDB, err := store.openDB()
+	if err != nil {
+		t.Fatalf("reopen versioned migrated telemetry db: %v", err)
+	}
+	defer migratedDB.Close()
+
+	var schemaVersion string
+	if err := migratedDB.QueryRow(
+		`SELECT value FROM meta WHERE key = 'schema_version'`,
+	).Scan(&schemaVersion); err != nil {
+		t.Fatalf("read versioned migrated schema version: %v", err)
+	}
+	if schemaVersion != "2" {
+		t.Fatalf("expected schema_version 2 after versioned migration, got %q", schemaVersion)
+	}
+
+	if err := store.SaveCallEvents(context.Background(), []telemetry.PersistedCallEvent{
+		{
+			CapturedAt:            now,
+			PricingProfileVersion: "pricing-v2026-05-01",
+			Call: telemetry.CallSnapshot{
+				ToolName:          "search_text",
+				StartedAt:         now.Add(-2 * time.Second),
+				FinishedAt:        now,
+				RequestTokens:     18,
+				ResponseTokens:    12,
+				TotalTokens:       30,
+				InputTokensSaved:  9,
+				OutputTokensSaved: 6,
+				TokensSaved:       15,
+				LogicalCalls:      2,
+				CostAvoidedUSD:    map[string]float64{"codex": 0.0000495},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("save call events after versioned migration: %v", err)
+	}
+
+	events, err := store.LoadCallEvents(context.Background(), now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("load call events after versioned migration: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected one migrated call event row, got %#v", events)
+	}
+	if events[0].Call.ToolName != "search_text" || events[0].Call.LogicalCalls != 2 {
+		t.Fatalf("unexpected migrated call event payload: %#v", events)
+	}
+	if events[0].PricingProfileVersion != "pricing-v2026-05-01" {
+		t.Fatalf("expected pricing profile version to round-trip after migration, got %#v", events)
+	}
+}
+
 func TestSQLiteTelemetryStoreCallEventRetentionPreservesSnapshots(t *testing.T) {
 	now := time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
 	store, err := NewSQLiteTelemetryStoreWithOptions(t.TempDir(), SQLiteTelemetryStoreOptions{

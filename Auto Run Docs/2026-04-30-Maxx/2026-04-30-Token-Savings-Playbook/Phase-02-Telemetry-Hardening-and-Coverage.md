@@ -36,10 +36,14 @@ This phase hardens the prototype into reliable runtime infrastructure by coverin
   - Completed in loop `00001`: tagged persisted telemetry cumulative snapshots and call-event payloads with `pricing_profile_version`, added round-trip/runtime coverage for the new field, and hardened SQLite index-store schema initialization retries so the full targeted storage/telemetry suite stays green under concurrent access.
   - Completed in loop `00001`: verified with `go test ./src/internal/savings ./src/internal/config ./src/internal/telemetry ./src/internal/storage ./src/internal/orchestration ./src/server ./src/cmd/gocodemunch-eval ./tests-go -count=1`, `go test ./src/cmd/gocodemunch-mcp ./src/cmd/vector-smoke -count=1`, and `go vet ./src/internal/savings ./src/internal/config ./src/internal/telemetry ./src/internal/storage ./src/internal/orchestration ./src/server ./src/cmd/gocodemunch-eval ./tests-go`.
 
-- [ ] Add robust tests for migrations, trend queries, and failure isolation:
+- [x] Add robust tests for migrations, trend queries, and failure isolation:
   - Add migration tests that upgrade older telemetry schema versions to the latest schema safely.
   - Add orchestration integration tests ensuring tool responses still succeed when telemetry persistence is unavailable.
   - Add `get_session_stats` contract tests for new trend fields and compatibility with existing consumers.
+  - Completed in loop `00001`: added explicit SQLite telemetry migration coverage for versioned schema-v1 databases, including post-upgrade call-event writes and pricing-profile round-trips alongside the existing snapshot-only legacy migration coverage.
+  - Completed in loop `00001`: added orchestration/runtime failure-isolation coverage proving successful tool responses and live `get_session_stats` rollups continue to work when telemetry flushes and persisted trend reads fail.
+  - Completed in loop `00001`: added an MCP wire-contract test in `src/server` covering `trend_windows`, `session_rollups`, `total_rollups`, and legacy `get_session_stats` keys against a seeded SQLite telemetry store.
+  - Completed in loop `00001`: verified with `go test ./src/internal/storage ./src/internal/orchestration ./src/server ./tests-go -count=1` and `go vet ./src/internal/storage ./src/internal/orchestration ./src/server ./tests-go`.
 
 - [ ] Run hardening verification and performance checks:
   - Run targeted test suites for telemetry/storage/orchestration and existing parity integration tests.
